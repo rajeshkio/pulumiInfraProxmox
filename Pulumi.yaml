@@ -1,0 +1,7 @@
+name: proxmox-k3s-cluster
+description: proxmox-k3s-cluster
+runtime: go
+config:
+  pulumi:tags:
+    value:
+      pulumi:template: go
