@@ -1,7 +1,6 @@
 config:
   proxmox-k3s-cluster:password:
     secure: AAABAGl9s0KsvoAS4g84MUxnyJqWmQLGAeHMbnldANzDkde0yRVTfg==
-  proxmox-k3s-cluster:proxmox-node: proxmox-2
   gateway: "192.168.90.1"
 
   proxmox-k3s-cluster:vm-templates:
@@ -18,6 +17,7 @@ config:
       authMethod: password
       role: k3s-server
       disksize: 32
+      proxmoxNode: proxmox-2
       actions:
         - type: "install-k3s-server"
           depends-on: ["loadbalancer"]
@@ -39,8 +39,34 @@ config:
       authMethod: ssh-key
       role: loadbalancer
       disksize: 32
+      proxmoxNode: proxmox-2
       actions:
         - type: "install-haproxy"
           config:
             backend-port: 6443
             frontend-port: 6443
+    - name: "harvester-ipxe-test"
+      vmName: "harvester-node"
+      role: "harvester-node"
+      bootMethod: "ipxe"
+      count: 1 # Just one VM for testing
+      memory: 40000 # Harvester needs more RAM
+      cpu: 16
+      disksize: 300
+      ipconfig: "static"
+      ips: ["192.168.90.210"] # Make sure this IP is available
+      gateway: "192.168.90.1"
+      proxmoxNode: proxmox-3
+      ipxeConfig:
+        bootServerUrl: "https://ipxe-server.rajesh-kumar.in/boot"
+        baseUrl: "https://ipxe-server.rajesh-kumar.in/iso/harvester"
+        osType: "harvester"
+        version: "v1.4.1"
+        configUrl: "https://ipxe-server.rajesh-kumar.in/config/harvester-config.yaml"
+        kernelParams:
+          - "ip=dhcp"
+          - "console=tty1"
+        autoInstall: true
+        isoFileName: "harvester-ipxe.iso"
+      actions:
+        - type: "configure-ipxe-boot"
