@@ -102,17 +102,23 @@ func main() {
 		if err := checkRequiredEnvVars(); err != nil {
 			return err
 		}
+
 		provider, err := setupProxmoxProvider(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to setup Proxmox provider: %w", err)
 		}
-		vmPassword, gateway, templates, err := loadConfig(ctx)
+		vmPassword, gateway, templates, features, err := loadConfig(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)
 		}
+		enabledTemplates := filterEnabledTemplates(ctx, templates, features)
+		if len(enabledTemplates) == 0 {
+			ctx.Log.Info("No templates enabled - nothing to deploy", nil)
+			return nil
+		}
 
 		var allVMs []*vm.VirtualMachine
-		for _, template := range templates {
+		for _, template := range enabledTemplates {
 			count := template.Count
 			if count == 0 {
 				count = 1
@@ -131,7 +137,7 @@ func main() {
 			}
 		}
 
-		roleGroups, err := groupVMsByRole(allVMs, templates)
+		roleGroups, err := groupVMsByRole(allVMs, enabledTemplates)
 		if err != nil {
 			return fmt.Errorf("cannot group VM by role")
 		}
@@ -155,7 +161,7 @@ func main() {
 			))
 		}
 
-		err = executeActions(ctx, templates, roleGroups, globalDeps, vmPassword)
+		err = executeActions(ctx, enabledTemplates, roleGroups, globalDeps, vmPassword)
 		if err != nil {
 			return fmt.Errorf("failed to execute actions %s", err)
 		}

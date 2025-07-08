@@ -45,13 +45,15 @@ func setupProxmoxProvider(ctx *pulumi.Context) (*proxmoxve.Provider, error) {
 	return provider, nil
 }
 
-func loadConfig(ctx *pulumi.Context) (string, string, []VMTemplate, error) {
+func loadConfig(ctx *pulumi.Context) (string, string, []VMTemplate, Features, error) {
 	cfg := config.New(ctx, "")
 	vmPassword := cfg.Require("password")
 	gateway := cfg.Require("gateway")
-
 	var templates []VMTemplate
 	cfg.RequireObject("vm-templates", &templates)
+
+	var features Features
+	cfg.RequireObject("features", &features)
 
 	for i := range templates {
 		if templates[i].BootMethod == "" {
@@ -69,7 +71,9 @@ func loadConfig(ctx *pulumi.Context) (string, string, []VMTemplate, error) {
 	}
 
 	ctx.Export("vmPassword", pulumi.String(vmPassword))
-	return vmPassword, gateway, templates, nil
+	ctx.Log.Info(fmt.Sprintf("Features - Loadbalancer: %v, K3s: %v, Harvester: %v",
+		features.Loadbalancer, features.K3s, features.Harvester), nil)
+	return vmPassword, gateway, templates, features, nil
 
 }
 

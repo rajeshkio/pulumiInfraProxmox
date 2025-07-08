@@ -5,6 +5,12 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
+type Features struct {
+	Loadbalancer bool `yaml:"loadbalancer"`
+	K3s          bool `yaml:"k3s"`
+	Harvester    bool `yaml:"harvester"`
+}
+
 type Action struct {
 	Type      string                 `yaml:"type"`
 	DependsOn []string               `yaml:"dependsOn,omitempty"`

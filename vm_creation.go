@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/muhlba91/pulumi-proxmoxve/sdk/v7/go/proxmoxve"
 	"github.com/muhlba91/pulumi-proxmoxve/sdk/v7/go/proxmoxve/vm"
@@ -27,24 +29,24 @@ func createVMFromTemplate(ctx *pulumi.Context, provider *proxmoxve.Provider, vmI
 
 func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int64, template VMTemplate, nodeName, gateway, password string) (*vm.VirtualMachine, error) {
 
-	// var userAccount *vm.VirtualMachineInitializationUserAccountArgs
-	// if template.AuthMethod == "ssh-key" {
-	// 	sshKey := strings.TrimSpace(os.Getenv("SSH_PUBLIC_KEY"))
-	// 	//		ctx.Log.Info(fmt.Sprintf("SSH KEY from env first 100 char: %s", sshKey[:100]), nil)
-	// 	//		ctx.Log.Info(fmt.Sprintf("SSH KEY length: %d", len(sshKey)), nil)
-	// 	userAccount = &vm.VirtualMachineInitializationUserAccountArgs{
-	// 		Username: pulumi.String(template.Username),
-	// 		Keys: pulumi.StringArray{
-	// 			pulumi.String(sshKey),
-	// 		},
-	// 	}
-	// } else {
-	// 	// For SLE VMs: Use password authentication
-	// 	userAccount = &vm.VirtualMachineInitializationUserAccountArgs{
-	// 		Username: pulumi.String(template.Username),
-	// 		Password: pulumi.String(password),
-	// 	}
-	// }
+	var userAccount *vm.VirtualMachineInitializationUserAccountArgs
+	if template.AuthMethod == "ssh-key" {
+		sshKey := strings.TrimSpace(os.Getenv("SSH_PUBLIC_KEY"))
+		//		ctx.Log.Info(fmt.Sprintf("SSH KEY from env first 100 char: %s", sshKey[:100]), nil)
+		//		ctx.Log.Info(fmt.Sprintf("SSH KEY length: %d", len(sshKey)), nil)
+		userAccount = &vm.VirtualMachineInitializationUserAccountArgs{
+			Username: pulumi.String(template.Username),
+			Keys: pulumi.StringArray{
+				pulumi.String(sshKey),
+			},
+		}
+	} else {
+		// For SLE VMs: Use password authentication
+		userAccount = &vm.VirtualMachineInitializationUserAccountArgs{
+			Username: pulumi.String(template.Username),
+			Password: pulumi.String(password),
+		}
+	}
 
 	var ipConfig *vm.VirtualMachineInitializationIpConfigArray
 	if template.IPConfig == "static" {
@@ -96,9 +98,9 @@ func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 			},
 		},
 		Initialization: &vm.VirtualMachineInitializationArgs{
-			DatastoreId:    pulumi.String("nfs-iso"),
-			UserDataFileId: pulumi.String("nfs-iso:snippets/test-basic.yaml"),
-			//	UserAccount:    userAccount,
+			DatastoreId: pulumi.String("nfs-iso"),
+			//	UserDataFileId: pulumi.String("nfs-iso:snippets/test-basic.yaml"),
+			UserAccount: userAccount,
 			Dns: &vm.VirtualMachineInitializationDnsArgs{
 				Domain: pulumi.String("local"),
 				Servers: pulumi.StringArray{

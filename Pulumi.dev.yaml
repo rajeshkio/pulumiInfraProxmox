@@ -1,4 +1,8 @@
 config:
+  proxmox-k3s-cluster:features:
+    loadbalancer: true
+    k3s: true
+    harvester: false
   proxmox-k3s-cluster:password:
     secure: AAABAGl9s0KsvoAS4g84MUxnyJqWmQLGAeHMbnldANzDkde0yRVTfg==
   proxmox-k3s-cluster:vm-templates:
@@ -6,7 +10,7 @@ config:
       cpu: 10
       disk-size: 100
       id: 9001
-      ipconfig: static
+      ipconfig: "static"
       ips: ["192.168.90.187", "192.168.90.188", "192.168.90.189"]
       memory: 10000
       name: sle-micro-template
@@ -28,9 +32,9 @@ config:
       cpu: 2
       disk-size: 20
       id: 9000
-      ips: ["192.168.90.190"]
+      ips: ["192.168.90.195"]
       memory: 2000
-      ipconfig: static
+      ipconfig: "static"
       name: ubuntu-22.04-template
       vmName: loadbalancer
       username: rajeshk

@@ -17,6 +17,36 @@ var actionHandlers = map[string]ActionHandler{
 	"configure-ipxe-boot": handleConfigureIPXEBoot,
 }
 
+func filterEnabledTemplates(ctx *pulumi.Context, templates []VMTemplate, features Features) []VMTemplate {
+	var enabled []VMTemplate
+
+	for _, template := range templates {
+		//	fmt.Printf("DEBUG: Checking template role: %s\n", template.Role)
+		switch template.Role {
+		case "loadbalancer":
+			if features.Loadbalancer {
+				//			fmt.Printf("DEBUG: Including loadbalancer template\n")
+				enabled = append(enabled, template)
+			}
+		case "k3s-server":
+			if features.K3s {
+				//			fmt.Printf("DEBUG: Including k3s-server template\n")
+				enabled = append(enabled, template)
+			}
+		case "harvester-node":
+			if features.Harvester { // Only include if true
+				//			fmt.Printf("DEBUG: Including harvester-node template\n")
+				enabled = append(enabled, template)
+			}
+		default:
+			enabled = append(enabled, template)
+			ctx.Log.Warn(fmt.Sprintf("Unknown role '%s' - including by default", template.Role), nil)
+		}
+	}
+	//	fmt.Printf("DEBUG: Filtered to %d templates\n", len(enabled))
+	return enabled
+}
+
 func handleInstallHAProxy(ctx *pulumi.Context, actionctx ActionContext) error {
 
 	k3sServerIPs, ok := actionctx.GlobalDeps["k3s-server-ips"].([]string)
@@ -208,11 +238,14 @@ EOF
 
 	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
 		Connection: &remote.ConnectionArgs{
-			Host:       pulumi.String(lbIP),
-			User:       pulumi.String("rajeshk"),
-			PrivateKey: pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+			Host:           pulumi.String(lbIP),
+			User:           pulumi.String("rajeshk"),
+			PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+			PerDialTimeout: pulumi.IntPtr(30),
+			DialErrorLimit: pulumi.IntPtr(20),
 		},
-		Create: pulumi.String(installCmd),
+		Create:   pulumi.String(installCmd),
+		Triggers: pulumi.Array{pulumi.String("always-run")},
 	}, pulumi.DependsOn([]pulumi.Resource{vmDependency}))
 	ctx.Log.Info(fmt.Sprintf("install haproxy error %s: ", err), nil)
 	return cmd, err
