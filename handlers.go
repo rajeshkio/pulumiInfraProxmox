@@ -161,11 +161,12 @@ func handleGetKubeconfig(ctx *pulumi.Context, actionctx ActionContext) error {
 		return fmt.Errorf("failed to get kubeconfig: %w", err)
 	}
 
-	kubeconfigPath := "./kubeconfig"
+	kubeconfigPath := "./kubeconfig.yaml"
 	_, err = local.NewFile(ctx, "save-kubeconfig", &local.FileArgs{
 		Filename: pulumi.String(kubeconfigPath),
 		Content:  cmd.Stdout,
-	}, pulumi.DependsOn([]pulumi.Resource{cmd}))
+	}, pulumi.DependsOn([]pulumi.Resource{cmd}),
+		pulumi.ReplaceOnChanges([]string{"content"}))
 	if err != nil {
 		return fmt.Errorf("failed to save kubeconfig locally: %w", err)
 	}
@@ -335,9 +336,10 @@ func getK3sKubeconfig(ctx *pulumi.Context, template VMTemplate, serverIP, vmPass
 
 	kubeconfigCommand := fmt.Sprintf(`
 		while [ ! -f /etc/rancher/k3s/k3s.yaml ]; do
-			echo "Waiting for kubeconfig..."
+			echo "Waiting for kubeconfig..." >&2 
 			sleep 5
 		done
+		sleep 2
 
 		sudo cat /etc/rancher/k3s/k3s.yaml | sed 's/127.0.0.1:6443/%s:6443/g'`, lbIP)
 
