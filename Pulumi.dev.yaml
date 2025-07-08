@@ -1,8 +1,6 @@
 config:
   proxmox-k3s-cluster:password:
     secure: AAABAGl9s0KsvoAS4g84MUxnyJqWmQLGAeHMbnldANzDkde0yRVTfg==
-  gateway: "192.168.90.1"
-
   proxmox-k3s-cluster:vm-templates:
     - count: 3
       cpu: 10
@@ -14,15 +12,15 @@ config:
       name: sle-micro-template
       vmName: k3s-server
       username: rajeshk
-      authMethod: password
+      authMethod: ssh-key
       role: k3s-server
       disksize: 32
       proxmoxNode: proxmox-2
       actions:
         - type: "install-k3s-server"
-          depends-on: ["loadbalancer"]
+          dependsOn: ["loadbalancer"]
         - type: "get-kubeconfig"
-          depends-on: ["loadbalancer"]
+          dependsOn: ["k3s-server-install-k3s-server"]
           config:
             cluster-init: true
             tls-san-loadbalancer: true
@@ -58,15 +56,20 @@ config:
       gateway: "192.168.90.1"
       proxmoxNode: proxmox-3
       ipxeConfig:
-        bootServerUrl: "https://ipxe-server.rajesh-kumar.in/boot"
-        baseUrl: "https://ipxe-server.rajesh-kumar.in/iso/harvester"
-        osType: "harvester"
         version: "v1.4.1"
-        configUrl: "https://ipxe-server.rajesh-kumar.in/config/harvester-config.yaml"
-        kernelParams:
-          - "ip=dhcp"
-          - "console=tty1"
-        autoInstall: true
         isoFileName: "harvester-ipxe.iso"
       actions:
         - type: "configure-ipxe-boot"
+      #   bootServerUrl: "https://ipxe-server.rajesh-kumar.in/boot"
+      #   baseUrl: "https://ipxe-server.rajesh-kumar.in/iso/harvester"
+      #   osType: "harvester"
+      #   version: "v1.4.1"
+      #   configUrl: "https://ipxe-server.rajesh-kumar.in/config/harvester-config.yaml"
+      #   kernelParams:
+      #     - "ip=dhcp"
+      #     - "console=tty1"
+      #   autoInstall: true
+      #   isoFileName: "harvester-ipxe.iso"
+      # actions:
+      #   - type: "configure-ipxe-boot"
+  proxmox-k3s-cluster:gateway: 192.168.90.1
