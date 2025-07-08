@@ -84,7 +84,7 @@ features:
 
 ### Local Requirements
 
-- Go 1.19+ installed
+- Go 1.23+ installed
 - Pulumi CLI installed (`curl -fsSL https://get.pulumi.com | sh`)
 - SSH key pair for VM authentication
 - Proxmox API credentials with VM creation permissions
