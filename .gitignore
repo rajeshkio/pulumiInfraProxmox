@@ -2,3 +2,4 @@ kubeconfig
 proxmox-k3s-cluster
 rajesh-tls-cert-5-july.crt
 rajesh-tls-cert-5-july.key
+kubeconfig.yaml
