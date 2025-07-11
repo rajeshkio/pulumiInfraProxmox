@@ -76,4 +76,16 @@ config:
       #   isoFileName: "harvester-ipxe.iso"
       # actions:
       #   - type: "configure-ipxe-boot"
+    # NEW: Bare VMs for testing (no roles, no actions)
+  proxmox-k3s-cluster:vm-groups:
+    - name: "kubeadm-test"
+      count: 3
+      templateId: 9000 # Ubuntu template
+      cpu: 4
+      memory: 4000
+      diskSize: 32
+      ips: ["192.168.90.220", "192.168.90.221", "192.168.90.222"]
+      username: rajeshk
+      authMethod: ssh-key
+      proxmoxNode: proxmox-2
   proxmox-k3s-cluster:gateway: 192.168.90.1

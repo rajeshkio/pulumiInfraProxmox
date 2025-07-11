@@ -18,7 +18,7 @@ func main() {
 		if err != nil {
 			return fmt.Errorf("failed to setup Proxmox provider: %w", err)
 		}
-		vmPassword, gateway, templates, features, err := loadConfig(ctx)
+		vmPassword, gateway, templates, vmGroups, features, err := loadConfig(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)
 		}
@@ -28,7 +28,7 @@ func main() {
 			return nil
 		}
 
-		var allVMs []*vm.VirtualMachine
+		var allRoleVMs []*vm.VirtualMachine
 		for _, template := range enabledTemplates {
 			count := template.Count
 			if count == 0 {
@@ -43,12 +43,12 @@ func main() {
 				if err != nil {
 					return fmt.Errorf("cannot create VM %s: %w", fmt.Sprintf("%s-%d", template.VMName, i), err)
 				}
-				allVMs = append(allVMs, vm)
+				allRoleVMs = append(allRoleVMs, vm)
 				ctx.Log.Info(fmt.Sprintf("Created VM: %s", fmt.Sprintf("%s-%d", template.VMName, i)), nil)
 			}
 		}
 
-		roleGroups, err := groupVMsByRole(allVMs, enabledTemplates)
+		roleGroups, err := groupVMsByRole(allRoleVMs, enabledTemplates)
 		if err != nil {
 			return fmt.Errorf("cannot group VM by role")
 		}
@@ -58,7 +58,7 @@ func main() {
 			ctx.Log.Info(fmt.Sprintf("Role '%s': %d with VM with IPs %v", roleName, len(group.VMs), group.IPs), nil)
 		}
 
-		ctx.Export("totalVMsCreated", pulumi.Int(len(allVMs)))
+		ctx.Export("totalVMsCreated", pulumi.Int(len(allRoleVMs)))
 		for roleName, group := range roleGroups {
 			ctx.Export(fmt.Sprintf("%s-count", roleName), pulumi.Int(len(group.VMs)))
 			ctx.Export(fmt.Sprintf("%s-ips", roleName), pulumi.StringArray(
@@ -76,6 +76,39 @@ func main() {
 		if err != nil {
 			return fmt.Errorf("failed to execute actions %s", err)
 		}
+
+		var totalBareVMs int
+		if len(vmGroups) > 0 {
+			ctx.Log.Info(fmt.Sprintf("Creating %d bare VM groups", len(vmGroups)), nil)
+			bareVMs, err := createBareVMs(ctx, provider, vmGroups, vmPassword)
+			if err != nil {
+				return fmt.Errorf("failed to create bare VMs: %w", err)
+			}
+			for groupName, vms := range bareVMs {
+				totalBareVMs += len(vms)
+				ctx.Export(fmt.Sprintf("bare-%s-count", groupName), pulumi.Int(len(vms)))
+				var groupIPs []pulumi.StringInput
+				group := vmGroups[0]
+				for _, g := range vmGroups {
+					if g.Name == groupName {
+						group = g
+						break
+					}
+				}
+				for i := 0; i < len(vms); i++ {
+					if i < len(group.IPs) {
+						groupIPs = append(groupIPs, pulumi.String(group.IPs[i]))
+					}
+				}
+				ctx.Export(fmt.Sprintf("bare-%s-ips", groupName), pulumi.StringArray(groupIPs))
+			}
+			ctx.Export("totalBareVMsCreated", pulumi.Int(totalBareVMs))
+			ctx.Log.Info(fmt.Sprintf("Successfully created %d bare VMs across %d groups", totalBareVMs, len(bareVMs)), nil)
+		} else {
+			ctx.Log.Info("No bare VM groups configured", nil)
+		}
+		ctx.Export("totalVMsCreated", pulumi.Int(len(allRoleVMs)+totalBareVMs))
+		ctx.Log.Info(fmt.Sprintf("Deployment complete - Role VMs: %d, Bare VMs: %d", len(allRoleVMs), totalBareVMs), nil)
 		return nil
 	})
 }

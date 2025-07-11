@@ -114,7 +114,10 @@ func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 		OnBoot:  pulumi.Bool(false),
 	}, pulumi.Provider(provider),
 		pulumi.DeleteBeforeReplace(true),
-		pulumi.IgnoreChanges([]string{"clone"}))
+		pulumi.IgnoreChanges([]string{"clone"}),
+		pulumi.Timeouts(&pulumi.CustomTimeouts{
+			Create: "5m",
+		}))
 	if err != nil {
 		return nil, err
 	}

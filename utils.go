@@ -45,12 +45,16 @@ func setupProxmoxProvider(ctx *pulumi.Context) (*proxmoxve.Provider, error) {
 	return provider, nil
 }
 
-func loadConfig(ctx *pulumi.Context) (string, string, []VMTemplate, Features, error) {
+func loadConfig(ctx *pulumi.Context) (string, string, []VMTemplate, []VMGroup, Features, error) {
 	cfg := config.New(ctx, "")
 	vmPassword := cfg.Require("password")
 	gateway := cfg.Require("gateway")
+
 	var templates []VMTemplate
 	cfg.RequireObject("vm-templates", &templates)
+
+	var vmGroups []VMGroup
+	cfg.TryObject("vm-groups", &vmGroups)
 
 	var features Features
 	cfg.RequireObject("features", &features)
@@ -70,10 +74,32 @@ func loadConfig(ctx *pulumi.Context) (string, string, []VMTemplate, Features, er
 		}
 	}
 
+	for i := range vmGroups {
+		if vmGroups[i].BootMethod == "" {
+			vmGroups[i].BootMethod = "cloud-init"
+		}
+		if vmGroups[i].AuthMethod == "" {
+			vmGroups[i].AuthMethod = "ssh-key"
+		}
+		if vmGroups[i].Username == "" {
+			vmGroups[i].Username = "rajeshk"
+		}
+		if vmGroups[i].ProxmoxNode == "" {
+			vmGroups[i].ProxmoxNode = "proxmox-3"
+		}
+		if vmGroups[i].Gateway == "" {
+			vmGroups[i].Gateway = gateway
+		}
+	}
+
 	ctx.Export("vmPassword", pulumi.String(vmPassword))
 	ctx.Log.Info(fmt.Sprintf("Features - Loadbalancer: %v, K3s: %v, Harvester: %v",
 		features.Loadbalancer, features.K3s, features.Harvester), nil)
-	return vmPassword, gateway, templates, features, nil
+
+	if len(vmGroups) > 0 {
+		ctx.Log.Info(fmt.Sprintf("Found %d VM groups for bare VM creation", len(vmGroups)), nil)
+	}
+	return vmPassword, gateway, templates, vmGroups, features, nil
 
 }
 
@@ -124,4 +150,54 @@ func buildGlobalDependency(roleGroups map[string]RoleGroup) map[string]interface
 		globalDeps[roleName+"-vms"] = group.VMs
 	}
 	return globalDeps
+}
+
+func createBareVMs(ctx *pulumi.Context, provider *proxmoxve.Provider, vmGroups []VMGroup, vmPassword string) (map[string][]*vm.VirtualMachine, error) {
+	bareVMs := make(map[string][]*vm.VirtualMachine)
+
+	for _, group := range vmGroups {
+		ctx.Log.Info(fmt.Sprintf("Creating bare VM group '%s' with %d VMs", group.Name, group.Count), nil)
+
+		var groupVMs []*vm.VirtualMachine
+		count := group.Count
+		if count == 0 {
+			count = 1
+		}
+
+		for i := range count {
+			// Convert VMGroup to VMTemplate for compatibility with existing createVMFromTemplate
+			template := VMTemplate{
+				Name:        group.Name,
+				VMName:      group.Name,
+				ID:          group.TemplateID,
+				Memory:      group.Memory,
+				CPU:         group.CPU,
+				DiskSize:    group.DiskSize,
+				IPs:         group.IPs,
+				Gateway:     group.Gateway,
+				Username:    group.Username,
+				AuthMethod:  group.AuthMethod,
+				ProxmoxNode: group.ProxmoxNode,
+				BootMethod:  group.BootMethod,
+				IPXEConfig:  group.IPXEConfig,
+				IPConfig:    "static", // Default for bare VMs
+			}
+
+			vm, err := createVMFromTemplate(ctx, provider, i, template, group.ProxmoxNode, group.Gateway, vmPassword)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create VM %s-%d: %w", group.Name, i, err)
+			}
+
+			groupVMs = append(groupVMs, vm)
+			ctx.Log.Info(fmt.Sprintf("Created bare VM: %s-%d", group.Name, i), nil)
+
+			if i < count-1 {
+				ctx.Log.Info("Waiting 30 seconds before creating next VM to avoid storage locks...", nil)
+			}
+		}
+
+		bareVMs[group.Name] = groupVMs
+	}
+
+	return bareVMs, nil
 }

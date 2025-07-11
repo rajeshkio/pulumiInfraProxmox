@@ -54,13 +54,29 @@ type VMTemplate struct {
 	Password    string   `yaml:"password,omitempty"` // global password
 	AuthMethod  string   `yaml:"authMethod"`
 	Count       int64    `yaml:"count,omitempty"`
-	Role        string   `yaml:"role,omitempty"` // NEW!
+	Role        string   `yaml:"role,omitempty"`
 	Actions     []Action `yaml:"actions,omitempty"`
 	ProxmoxNode string   `yaml:"proxmoxNode,omitempty"`
 
 	// ipxe boot options for Harvester
 	BootMethod string      `yaml:"bootMethod,omitempty"`
 	IPXEConfig *IPXEConfig `yaml:"ipxeConfig,omitempty"`
+}
+
+type VMGroup struct {
+	Name        string      `yaml:"name"`
+	Count       int64       `yaml:"count"`
+	TemplateID  int64       `yaml:"templateId"`
+	Memory      int64       `yaml:"memory"`
+	CPU         int64       `yaml:"CPU"`
+	DiskSize    int64       `yaml:"diskSize"`
+	IPs         []string    `yaml:"ips"`
+	Gateway     string      `yaml:"gateway,omitempty"`
+	Username    string      `yaml:"username,omitempty"`
+	AuthMethod  string      `yaml:"authMethod,omitempty"`
+	ProxmoxNode string      `yaml:"proxmoxNode,omitempty"`
+	BootMethod  string      `yaml:"bootMethod,omitempty"`
+	IPXEConfig  *IPXEConfig `yaml:"ipxeConfig,omitempty"`
 }
 
 type RoleGroup struct {
