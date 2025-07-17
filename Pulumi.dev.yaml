@@ -1,8 +1,8 @@
 config:
   proxmox-k3s-cluster:features:
-    loadbalancer: true
-    k3s: true
-    harvester: false
+    loadbalancer: false
+    k3s: false
+    harvester: true
   proxmox-k3s-cluster:password:
     secure: AAABAGl9s0KsvoAS4g84MUxnyJqWmQLGAeHMbnldANzDkde0yRVTfg==
   proxmox-k3s-cluster:vm-templates:
