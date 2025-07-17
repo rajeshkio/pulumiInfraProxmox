@@ -45,159 +45,122 @@ func setupProxmoxProvider(ctx *pulumi.Context) (*proxmoxve.Provider, error) {
 	return provider, nil
 }
 
-func loadConfig(ctx *pulumi.Context) (string, string, []VMTemplate, []VMGroup, Features, error) {
+func loadConfig(ctx *pulumi.Context) (string, string, []VM, *Services, error) {
 	cfg := config.New(ctx, "")
 	vmPassword := cfg.Require("password")
 	gateway := cfg.Require("gateway")
 
-	var templates []VMTemplate
-	cfg.RequireObject("vm-templates", &templates)
+	var vms []VM
+	cfg.RequireObject("vms", &vms)
 
-	var vmGroups []VMGroup
-	cfg.TryObject("vm-groups", &vmGroups)
+	var services Services
+	cfg.RequireObject("services", &services)
 
-	var features Features
-	cfg.RequireObject("features", &features)
-
-	for i := range templates {
-		if templates[i].BootMethod == "" {
-			templates[i].BootMethod = "cloud-init"
+	for i := range vms {
+		if vms[i].TemplateID == 0 {
+			return "", "", nil, nil, fmt.Errorf("VM '%s' has no templateId set. Template ID is required and must be between 100-2147483647", vms[i].Name)
 		}
-		if templates[i].AuthMethod == "" {
-			templates[i].AuthMethod = "password"
+		if vms[i].Name == "" {
+			return "", "", nil, nil, fmt.Errorf("VM at index %d has no name set", i)
 		}
-		if templates[i].Username == "" {
-			templates[i].Username = "rajeshk"
+		if len(vms[i].IPs) == 0 {
+			return "", "", nil, nil, fmt.Errorf("VM '%s' has no IPs configured", vms[i].Name)
 		}
-		if templates[i].ProxmoxNode == "" {
-			templates[i].ProxmoxNode = "proxmox-3"
+		if vms[i].BootMethod == "" {
+			vms[i].BootMethod = "cloud-init"
 		}
-	}
-
-	for i := range vmGroups {
-		if vmGroups[i].BootMethod == "" {
-			vmGroups[i].BootMethod = "cloud-init"
+		if vms[i].AuthMethod == "" {
+			vms[i].AuthMethod = "ssh-key"
 		}
-		if vmGroups[i].AuthMethod == "" {
-			vmGroups[i].AuthMethod = "ssh-key"
+		if vms[i].Username == "" {
+			vms[i].Username = "rajeshk"
 		}
-		if vmGroups[i].Username == "" {
-			vmGroups[i].Username = "rajeshk"
+		if vms[i].ProxmoxNode == "" {
+			vms[i].ProxmoxNode = "proxmox-3"
 		}
-		if vmGroups[i].ProxmoxNode == "" {
-			vmGroups[i].ProxmoxNode = "proxmox-3"
+		if vms[i].Gateway == "" {
+			vms[i].Gateway = gateway
 		}
-		if vmGroups[i].Gateway == "" {
-			vmGroups[i].Gateway = gateway
+		if vms[i].IPConfig == "" {
+			vms[i].IPConfig = "static"
 		}
 	}
 
 	ctx.Export("vmPassword", pulumi.String(vmPassword))
-	ctx.Log.Info(fmt.Sprintf("Features - Loadbalancer: %v, K3s: %v, Harvester: %v",
-		features.Loadbalancer, features.K3s, features.Harvester), nil)
+	ctx.Log.Info(fmt.Sprintf("Infrastructure: Found %d VM groups to create", len(vms)), nil)
 
-	if len(vmGroups) > 0 {
-		ctx.Log.Info(fmt.Sprintf("Found %d VM groups for bare VM creation", len(vmGroups)), nil)
+	enabledServices := getEnabledServices(&services)
+	if len(enabledServices) > 0 {
+		ctx.Log.Info(fmt.Sprintf("Services: Found enabled services: %v", enabledServices), nil)
 	}
-	return vmPassword, gateway, templates, vmGroups, features, nil
-
+	return vmPassword, gateway, vms, &services, nil
 }
 
-func groupVMsByRole(allVMs []*vm.VirtualMachine, templates []VMTemplate) (map[string]RoleGroup, error) {
-	roleGroups := make(map[string]RoleGroup) // map with key string and value of type rolegroup
-	vmIndex := 0
-	expectedVMCount := 0
-
-	for _, template := range templates {
-		count := template.Count
-		if count == 0 {
-			count = 1
-		}
-		if len(template.IPs) < int(count) {
-			return nil, fmt.Errorf("template '%s' role '%s' needs %d IPs but only has %d: %v", template.Name, template.Role, count, len(template.IPs), template.IPs)
-		}
-		expectedVMCount += int(count)
-	}
-	if expectedVMCount != len(allVMs) {
-		return nil, fmt.Errorf("VM count mismatch: expected %d VMs but got %d", expectedVMCount, len(allVMs))
+func getEnabledServices(services *Services) []string {
+	if services == nil {
+		return []string{}
 	}
 
-	// Now safely build the groups
-	for _, template := range templates {
-		count := template.Count
-		if count == 0 {
-			count = 1
-		}
-		for i := range count {
-			if _, exists := roleGroups[template.Role]; !exists {
-				roleGroups[template.Role] = RoleGroup{}
-			}
-			group := roleGroups[template.Role]
-			group.VMs = append(group.VMs, allVMs[vmIndex])
-			group.IPs = append(group.IPs, template.IPs[i])
-			roleGroups[template.Role] = group
-			vmIndex++
+	serviceRegistry := map[string]*ServiceConfig{
+		"k3s":       services.K3s,
+		"kubeadm":   services.Kubeadm,
+		"haproxy":   services.HAProxy,
+		"harvester": services.Harvester,
+		"rke2":      services.RKE2,
+		"talos":     services.Talos,
+	}
+
+	var enabledServices []string
+	for name, config := range serviceRegistry {
+		if config != nil && config.Enabled {
+			enabledServices = append(enabledServices, name)
 		}
 	}
-	return roleGroups, nil
+	return enabledServices
 }
 
-func buildGlobalDependency(roleGroups map[string]RoleGroup) map[string]interface{} {
-	globalDeps := make(map[string]interface{})
+func createVMs(ctx *pulumi.Context, provider *proxmoxve.Provider, vms []VM, vmPassword string) (map[string][]*vm.VirtualMachine, error) {
+	vmGroups := make(map[string][]*vm.VirtualMachine)
 
-	for roleName, group := range roleGroups {
-		globalDeps[roleName+"-ips"] = group.IPs
-		globalDeps[roleName+"-vms"] = group.VMs
-	}
-	return globalDeps
-}
-
-func createBareVMs(ctx *pulumi.Context, provider *proxmoxve.Provider, vmGroups []VMGroup, vmPassword string) (map[string][]*vm.VirtualMachine, error) {
-	bareVMs := make(map[string][]*vm.VirtualMachine)
-
-	for _, group := range vmGroups {
-		ctx.Log.Info(fmt.Sprintf("Creating bare VM group '%s' with %d VMs", group.Name, group.Count), nil)
+	for _, vmDef := range vms {
+		ctx.Log.Info(fmt.Sprintf("Creating VM group '%s' with %d VMs", vmDef.Name, vmDef.Count), nil)
 
 		var groupVMs []*vm.VirtualMachine
-		count := group.Count
+		count := vmDef.Count
 		if count == 0 {
 			count = 1
 		}
 
 		for i := range count {
-			// Convert VMGroup to VMTemplate for compatibility with existing createVMFromTemplate
-			template := VMTemplate{
-				Name:        group.Name,
-				VMName:      group.Name,
-				ID:          group.TemplateID,
-				Memory:      group.Memory,
-				CPU:         group.CPU,
-				DiskSize:    group.DiskSize,
-				IPs:         group.IPs,
-				Gateway:     group.Gateway,
-				Username:    group.Username,
-				AuthMethod:  group.AuthMethod,
-				ProxmoxNode: group.ProxmoxNode,
-				BootMethod:  group.BootMethod,
-				IPXEConfig:  group.IPXEConfig,
-				IPConfig:    "static", // Default for bare VMs
-			}
-
-			vm, err := createVMFromTemplate(ctx, provider, i, template, group.ProxmoxNode, group.Gateway, vmPassword)
+			vm, err := createVMWithRetry(ctx, provider, i, vmDef, vmDef.ProxmoxNode, vmDef.Gateway, vmPassword, 3)
 			if err != nil {
-				return nil, fmt.Errorf("failed to create VM %s-%d: %w", group.Name, i, err)
+				return nil, fmt.Errorf("failed to create VM %s-%d: %w", vmDef.Name, i, err)
 			}
 
 			groupVMs = append(groupVMs, vm)
-			ctx.Log.Info(fmt.Sprintf("Created bare VM: %s-%d", group.Name, i), nil)
+			ctx.Log.Info(fmt.Sprintf("Created VM: %s-%d", vmDef.Name, i), nil)
+		}
+		vmGroups[vmDef.Name] = groupVMs
+	}
+	return vmGroups, nil
+}
 
-			if i < count-1 {
-				ctx.Log.Info("Waiting 30 seconds before creating next VM to avoid storage locks...", nil)
+func buildGlobalDependency(vmGroups map[string][]*vm.VirtualMachine, vms []VM) map[string]interface{} {
+	globalDeps := make(map[string]interface{})
+
+	for groupName, vmList := range vmGroups {
+		globalDeps[groupName+"-vms"] = vmList
+
+		var ips []string
+		for _, vmDef := range vms {
+			if vmDef.Name == groupName {
+				for i := 0; i < len(vmList) && i < len(vmDef.IPs); i++ {
+					ips = append(ips, vmDef.IPs[i])
+				}
+				break
 			}
 		}
-
-		bareVMs[group.Name] = groupVMs
+		globalDeps[groupName+"-ips"] = ips
 	}
-
-	return bareVMs, nil
+	return globalDeps
 }

@@ -1,91 +1,105 @@
 config:
-  proxmox-k3s-cluster:features:
-    loadbalancer: true
-    k3s: true
-    harvester: false
   proxmox-k3s-cluster:password:
     secure: AAABAGl9s0KsvoAS4g84MUxnyJqWmQLGAeHMbnldANzDkde0yRVTfg==
-  proxmox-k3s-cluster:vm-templates:
-    - count: 3
-      cpu: 10
-      disk-size: 100
-      id: 9001
-      ipconfig: "static"
-      ips: ["192.168.90.187", "192.168.90.188", "192.168.90.189"]
-      memory: 10000
-      name: sle-micro-template
-      vmName: k3s-server
-      username: rajeshk
-      authMethod: ssh-key
-      role: k3s-server
-      disksize: 32
-      proxmoxNode: proxmox-2
-      actions:
-        - type: "install-k3s-server"
-          dependsOn: ["loadbalancer"]
-        - type: "get-kubeconfig"
-          dependsOn: ["k3s-server-install-k3s-server"]
-          config:
-            cluster-init: true
-            tls-san-loadbalancer: true
-    - count: 1
-      cpu: 2
-      disk-size: 20
-      id: 9000
-      ips: ["192.168.90.195"]
-      memory: 2000
-      ipconfig: "static"
-      name: ubuntu-22.04-template
-      vmName: loadbalancer
-      username: rajeshk
-      authMethod: ssh-key
-      role: loadbalancer
-      disksize: 32
-      proxmoxNode: proxmox-2
-      actions:
-        - type: "install-haproxy"
-          config:
-            backend-port: 6443
-            frontend-port: 6443
-    - name: "harvester-ipxe-test"
-      vmName: "harvester-node"
-      role: "harvester-node"
-      bootMethod: "ipxe"
-      count: 1 # Just one VM for testing
-      memory: 40000 # Harvester needs more RAM
-      cpu: 16
-      disksize: 300
-      ipconfig: "static"
-      ips: ["192.168.90.210"] # Make sure this IP is available
-      gateway: "192.168.90.1"
-      proxmoxNode: proxmox-3
-      ipxeConfig:
-        version: "v1.4.1"
-        isoFileName: "harvester-ipxe.iso"
-      actions:
-        - type: "configure-ipxe-boot"
-      #   bootServerUrl: "https://ipxe-server.rajesh-kumar.in/boot"
-      #   baseUrl: "https://ipxe-server.rajesh-kumar.in/iso/harvester"
-      #   osType: "harvester"
-      #   version: "v1.4.1"
-      #   configUrl: "https://ipxe-server.rajesh-kumar.in/config/harvester-config.yaml"
-      #   kernelParams:
-      #     - "ip=dhcp"
-      #     - "console=tty1"
-      #   autoInstall: true
-      #   isoFileName: "harvester-ipxe.iso"
-      # actions:
-      #   - type: "configure-ipxe-boot"
-    # NEW: Bare VMs for testing (no roles, no actions)
-  proxmox-k3s-cluster:vm-groups:
-    - name: "kubeadm-test"
+  proxmox-k3s-cluster:gateway: 192.168.90.1
+
+  # INFRASTRUCTURE LAYER - Just VMs (replaces vm-templates, vm-groups, etc.)
+  proxmox-k3s-cluster:vms:
+    # Kubernetes control plane nodes
+    - name: "control-plane"
       count: 3
       templateId: 9000 # Ubuntu template
       cpu: 4
       memory: 4000
       diskSize: 32
-      ips: ["192.168.90.220", "192.168.90.221", "192.168.90.222"]
+      ips: ["192.168.90.230", "192.168.90.231", "192.168.90.232"]
       username: rajeshk
       authMethod: ssh-key
       proxmoxNode: proxmox-2
-  proxmox-k3s-cluster:gateway: 192.168.90.1
+      bootMethod: cloud-init
+
+    # Kubernetes worker nodes
+    - name: "workers"
+      count: 1
+      templateId: 9000 # Ubuntu template
+      cpu: 4
+      memory: 4000
+      diskSize: 32
+      ips: ["192.168.90.233", "192.168.90.234"]
+      username: rajeshk
+      authMethod: ssh-key
+      proxmoxNode: proxmox-2
+      bootMethod: cloud-init
+
+    # # Load balancer nodes
+    # - name: "load-balancer"
+    #   count: 1
+    #   templateId: 9000 # Ubuntu template
+    #   cpu: 2
+    #   memory: 2000
+    #   diskSize: 32
+    #   ips: ["192.168.90.235"]
+    #   username: rajeshk
+    #   authMethod: ssh-key
+    #   proxmoxNode: proxmox-2
+    #   bootMethod: cloud-init
+
+    # # Harvester hyperconverged infrastructure (iPXE boot)
+    # - name: "harvester-nodes"
+    #   count: 1
+    #   templateId: 9000 # Doesn't matter for iPXE
+    #   cpu: 16
+    #   memory: 40000
+    #   diskSize: 300
+    #   ips: ["192.168.90.240"]
+    #   username: rajeshk
+    #   authMethod: ssh-key
+    #   proxmoxNode: proxmox-3
+    #   bootMethod: ipxe # iPXE boot for Harvester
+    #   ipxeConfig:
+    #     version: "v1.4.1"
+    #     isoFileName: "harvester-ipxe.iso"
+
+  # SERVICES LAYER - What runs on those VMs (replaces role-based actions)
+  proxmox-k3s-cluster:services:
+    # Load balancer service
+    haproxy:
+      enabled: false
+      targets: ["load-balancer"]
+      backendDiscovery: "control-plane" # HAProxy will load balance to control-plane nodes
+      config:
+        frontend-port: 6443
+        backend-port: 6443
+
+    # Choose ONE Kubernetes distribution for testing
+    kubeadm:
+      enabled: true # Testing kubeadm
+      controlPlane: ["control-plane"]
+      workers: ["workers"]
+      config:
+        kubernetes-version: "1.28.0"
+        pod-network-cidr: "10.244.0.0/16"
+
+    k3s:
+      enabled: false # Not using K3s this time
+      controlPlane: ["control-plane"]
+      workers: ["workers"]
+      config:
+        cluster-init: false
+        tls-san-loadbalancer: true
+
+    rke2:
+      enabled: false # Not using RKE2 this time
+      controlPlane: ["control-plane"]
+      workers: ["workers"]
+
+    talos:
+      enabled: false # Not using Talos this time
+      targets: ["control-plane", "workers"]
+
+    # Harvester hyperconverged infrastructure
+    harvester:
+      enabled: false
+      targets: ["harvester-nodes"]
+      config:
+        cluster-mode: "create" # Create new cluster vs join existing

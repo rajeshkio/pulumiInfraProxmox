@@ -1,0 +1,19 @@
+#!ipxe
+set version 1.5.1
+set localbase https://ipxe-server.rajesh-kumar.in/iso/harvester/${version}
+set rancherbase https://releases.rancher.com/harvester/${version}
+
+dhcp
+echo Booting Harvester ${version}
+
+# Try local first, fallback to remote
+kernel ${localbase}/harvester-${version}-vmlinuz-amd64 initrd=harvester-${version}-initrd-amd64 ip=dhcp net.ifnames=1 rd.cos.disable rd.noverifyssl root=live:${localbase}/harvester-${version}-rootfs-amd64.squashfs harvester.install.config_url=https://ipxe-server.rajesh-kumar.in/config/harvester-${version}-config.yaml harvester.install.automatic=true || goto rancher_fallback
+initrd ${localbase}/harvester-${version}-initrd-amd64 || goto rancher_fallback
+goto boot
+
+:rancher_fallback
+kernel ${rancherbase}/harvester-${version}-vmlinuz-amd64 initrd=harvester-${version}-initrd-amd64 ip=dhcp net.ifnames=1 rd.cos.disable rd.noverifyssl root=live:${rancherbase}/harvester-${version}-rootfs-amd64.squashfs harvester.install.config_url=https://ipxe-server.rajesh-kumar.in/config/harvester-${version}-config.yaml harvester.install.automatic=true
+initrd ${rancherbase}/harvester-${version}-initrd-amd64
+
+:boot
+boot

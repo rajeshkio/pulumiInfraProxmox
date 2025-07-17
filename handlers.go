@@ -10,88 +10,59 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
-var actionHandlers = map[string]ActionHandler{
-	"install-haproxy":     handleInstallHAProxy,
-	"install-k3s-server":  handleInstallK3Sserver,
-	"get-kubeconfig":      handleGetKubeconfig,
-	"configure-ipxe-boot": handleConfigureIPXEBoot,
+var serviceHandlers = map[string]ServiceHandler{
+	"k3s": handleK3sService,
+	//	"kubeadm":   handleKubeadmService,
+	"haproxy": handleHAProxyService,
+	// "harvester": handleHarvesterService,
+	// "rke2":      handleRKE2Service,
+	// "talos":     handleTalosService,
 }
 
-func filterEnabledTemplates(ctx *pulumi.Context, templates []VMTemplate, features Features) []VMTemplate {
-	var enabled []VMTemplate
+func handleHAProxyService(ctx *pulumi.Context, serviceCtx ServiceContext) error {
+	ctx.Log.Info(fmt.Sprintf("Installing HAProxy service on %d VMs", len(serviceCtx.VMs)), nil)
 
-	for _, template := range templates {
-		//	fmt.Printf("DEBUG: Checking template role: %s\n", template.Role)
-		switch template.Role {
-		case "loadbalancer":
-			if features.Loadbalancer {
-				//			fmt.Printf("DEBUG: Including loadbalancer template\n")
-				enabled = append(enabled, template)
-			}
-		case "k3s-server":
-			if features.K3s {
-				//			fmt.Printf("DEBUG: Including k3s-server template\n")
-				enabled = append(enabled, template)
-			}
-		case "harvester-node":
-			if features.Harvester { // Only include if true
-				//			fmt.Printf("DEBUG: Including harvester-node template\n")
-				enabled = append(enabled, template)
-			}
-		default:
-			enabled = append(enabled, template)
-			ctx.Log.Warn(fmt.Sprintf("Unknown role '%s' - including by default", template.Role), nil)
-		}
+	backendDiscovery := serviceCtx.ServiceConfig.BackendDiscovery
+	if backendDiscovery == "" {
+		return fmt.Errorf("HAProxy service requires backend-discovery configuration")
 	}
-	//	fmt.Printf("DEBUG: Filtered to %d templates\n", len(enabled))
-	return enabled
-}
+	ctx.Log.Info(fmt.Sprintf("Looking for backend IPs from: %s", backendDiscovery), nil)
 
-func handleInstallHAProxy(ctx *pulumi.Context, actionctx ActionContext) error {
-
-	k3sServerIPs, ok := actionctx.GlobalDeps["k3s-server-ips"].([]string)
+	backendIPs, ok := serviceCtx.GlobalDeps[backendDiscovery+"-ips"].([]string)
 	if !ok {
-		return fmt.Errorf("haproxy needs k3s server ips but they are not available")
+		return fmt.Errorf("HAProxy needs backend IPs from '%s' but they are not available", backendDiscovery)
 	}
-	lbIP := actionctx.IPs[0]
-	lbVM := actionctx.VMs[0]
 
-	ctx.Log.Info(fmt.Sprintf("installing haproxy on %s with backends: %v", lbIP, k3sServerIPs), nil)
-	//	ctx.Log.Info(fmt.Sprintf("VM dependency: %v", lbVM.ID()), nil)
+	for i, lbVM := range serviceCtx.VMs {
+		lbIP := serviceCtx.IPs[i]
+		ctx.Log.Info(fmt.Sprintf("Installing HAProxy on %s with backends: %v", lbIP, backendIPs), nil)
+		cmd, err := installHaProxy(ctx, lbIP, lbVM, backendIPs, serviceCtx.VMPassword)
+		if err != nil {
+			return fmt.Errorf("HAProxy installation failed on %s: %w", lbIP, err)
+		}
+		serviceCtx.GlobalDeps["haproxy-install-command"] = cmd
 
-	cmd, err := installHaProxy(ctx, lbIP, lbVM, k3sServerIPs)
-	if err != nil {
-		ctx.Log.Error(fmt.Sprintf("HAProxy installation failed: %v", err), nil)
 	}
-	actionctx.GlobalDeps["haproxy-install-command"] = cmd
-
-	ctx.Log.Info("HAProxy installation initiated successfully", nil)
+	ctx.Log.Info("HAProxy service installed successfully", nil)
 	return nil
 }
 
-func handleInstallK3Sserver(ctx *pulumi.Context, actionctx ActionContext) error {
-	ctx.Log.Info(fmt.Sprintf("Auth method for k3s servers: %s", actionctx.Templates.AuthMethod), nil)
-	ctx.Log.Info(fmt.Sprintf("Username: %s", actionctx.Templates.Username), nil)
+func handleK3sService(ctx *pulumi.Context, serviceCtx ServiceContext) error {
+	ctx.Log.Info(fmt.Sprintf("Installing K3s service on %d VMs", len(serviceCtx.VMs)), nil)
 
-	lbIPs, ok := actionctx.GlobalDeps["loadbalancer-ips"].([]string)
+	lbIPs, ok := serviceCtx.GlobalDeps["load-balancer-ips"].([]string)
 	if !ok {
-		return fmt.Errorf("k3s server needs loadbalancer IP but its not available")
-	}
-
-	var haproxyCmd pulumi.Resource
-	if haproxyResource, exists := actionctx.GlobalDeps["haproxy-install-command"]; exists {
-		if cmd, ok := haproxyResource.(*remote.Command); ok {
-			haproxyCmd = cmd
-		}
+		return fmt.Errorf("k3s server needs loadbalancer IP but they are not available")
 	}
 	lbIP := lbIPs[0]
+
 	ctx.Log.Info(fmt.Sprintf("installing k3s server with LBIP: %s", lbIP), nil)
 	//var k3sCommands []*remote.Command
 	var k3sServerToken pulumi.StringOutput
 	var firstServerIP string
 
-	for i, serverVM := range actionctx.VMs {
-		serverIP := actionctx.IPs[i]
+	for i, serverVM := range serviceCtx.VMs {
+		serverIP := serviceCtx.IPs[i]
 		isFirstServer := (i == 0)
 
 		ctx.Log.Info(fmt.Sprintf("Installing K3s on server %d: %s", i+1, serverIP), nil)
@@ -100,86 +71,59 @@ func handleInstallK3Sserver(ctx *pulumi.Context, actionctx ActionContext) error 
 			firstServerIP = serverIP
 			ctx.Log.Info(fmt.Sprintf("installing k3s on server %d: %s", i+1, serverIP), nil)
 
-			k3sCmd, err := installK3SServer(ctx, lbIP, actionctx.VMPassword, serverIP, serverVM, true, pulumi.String("").ToStringOutput(), haproxyCmd)
+			k3sCmd, err := installK3SServer(ctx, lbIP, serviceCtx.VMPassword, serverIP, serverVM, true, pulumi.String("").ToStringOutput(), nil)
 			if err != nil {
 				return fmt.Errorf("cannot install K3s server on first node %s: %w", serverIP, err)
 			}
 			//	k3sCommands = append(k3sCommands, k3sCmd)
-			tokenCmd, err := getK3sToken(ctx, serverIP, actionctx.VMPassword, k3sCmd)
+			tokenCmd, err := getK3sToken(ctx, serverIP, serviceCtx.VMPassword, k3sCmd)
 			if err != nil {
 				return fmt.Errorf("cannot get k3s token: %w", err)
 			}
 			k3sServerToken = tokenCmd.Stdout
 		} else {
-			_, err := installK3SServer(ctx, lbIP, actionctx.VMPassword, serverIP, serverVM, false, k3sServerToken, haproxyCmd)
+			_, err := installK3SServer(ctx, lbIP, serviceCtx.VMPassword, serverIP, serverVM, false, k3sServerToken, nil)
 			if err != nil {
 				return fmt.Errorf("cannot install k3s on server %s: %w", serverIP, serverVM)
 			}
 			//		k3sCommands = append(k3sCommands, k3sCmds)
 		}
 	}
+	if firstServerIP != "" {
+		err := getK3sKubeconfig(ctx, firstServerIP, serviceCtx.VMPassword, lbIP, serviceCtx.VMs[0])
+		if err != nil {
+			return fmt.Errorf("failed to extract kubeconfig: %w", err)
+		}
+	}
 
-	actionctx.GlobalDeps["k3s-first-server-ip"] = firstServerIP
-	actionctx.GlobalDeps["k3s-loadbalancer-ip"] = lbIP
-	ctx.Log.Info(fmt.Sprintf("K3s installation initiated on %d servers", len(actionctx.VMs)), nil)
+	ctx.Log.Info(fmt.Sprintf("K3s service installed on %d servers", len(serviceCtx.VMs)), nil)
 	return nil
 }
 
-func handleConfigureIPXEBoot(ctx *pulumi.Context, actionCtx ActionContext) error {
-	template := actionCtx.Templates
-	config := template.IPXEConfig
+// func handleConfigureIPXEBoot(ctx *pulumi.Context, actionCtx ActionContext) error {
+// 	template := actionCtx.Templates
+// 	config := template.IPXEConfig
 
-	if template.BootMethod != "ipxe" {
-		return fmt.Errorf("configure-ipxe-boot action requires bootMethod: ipxe")
-	}
+// 	if template.BootMethod != "ipxe" {
+// 		return fmt.Errorf("configure-ipxe-boot action requires bootMethod: ipxe")
+// 	}
 
-	// Simple approach: just log which script file the VM will use
-	scriptName := fmt.Sprintf("harvester-%s.ipxe", config.Version)
-	scriptURL := fmt.Sprintf("%s/%s", config.BootServerURL, scriptName)
+// 	// Simple approach: just log which script file the VM will use
+// 	scriptName := fmt.Sprintf("harvester-%s.ipxe", config.Version)
+// 	scriptURL := fmt.Sprintf("%s/%s", config.BootServerURL, scriptName)
 
-	for _, vmIP := range actionCtx.IPs {
-		ctx.Log.Info(fmt.Sprintf("VM %s will boot using script: %s", vmIP, scriptURL), nil)
-	}
+// 	for _, vmIP := range actionCtx.IPs {
+// 		ctx.Log.Info(fmt.Sprintf("VM %s will boot using script: %s", vmIP, scriptURL), nil)
+// 	}
 
-	return nil
-}
+// 	return nil
+// }
 
-func handleGetKubeconfig(ctx *pulumi.Context, actionctx ActionContext) error {
-	lbIPs, ok := actionctx.GlobalDeps["loadbalancer-ips"].([]string)
-	if !ok {
-		return fmt.Errorf("kubeconfig needs loadbalancer IP but it's not available")
-	}
-
-	firstServerIP := actionctx.IPs[0]
-	firstServerVM := actionctx.VMs[0]
-	lbIP := lbIPs[0]
-
-	ctx.Log.Info(fmt.Sprintf("Getting kubeconfig from %s with LB IP %s", firstServerIP, lbIP), nil)
-
-	cmd, err := getK3sKubeconfig(ctx, actionctx.Templates, firstServerIP, actionctx.VMPassword, lbIP, firstServerVM)
-	if err != nil {
-		return fmt.Errorf("failed to get kubeconfig: %w", err)
-	}
-
-	kubeconfigPath := "./kubeconfig.yaml"
-	_, err = local.NewFile(ctx, "save-kubeconfig", &local.FileArgs{
-		Filename: pulumi.String(kubeconfigPath),
-		Content:  cmd.Stdout,
-	}, pulumi.DependsOn([]pulumi.Resource{cmd}),
-		pulumi.ReplaceOnChanges([]string{"content"}))
-	if err != nil {
-		return fmt.Errorf("failed to save kubeconfig locally: %w", err)
-	}
-	ctx.Export("kubeconfig", cmd.Stdout)
-	ctx.Log.Info("kubeconfig exported successfully", nil)
-	return nil
-}
-
-func installHaProxy(ctx *pulumi.Context, lbIP string, vmDependency pulumi.Resource, k3sServerIPs []string) (*remote.Command, error) {
+func installHaProxy(ctx *pulumi.Context, lbIP string, vmDependency pulumi.Resource, backendIPs []string, vmPassword string) (*remote.Command, error) {
 
 	ctx.Log.Info("Print from installHaProxy", nil)
 	var backendServers strings.Builder
-	for i, serverIP := range k3sServerIPs {
+	for i, serverIP := range backendIPs {
 		backendServers.WriteString(fmt.Sprintf("    server k3s-server-%d %s:6443 check\n", i+1, serverIP))
 	}
 
@@ -331,7 +275,7 @@ func getK3sToken(ctx *pulumi.Context, firstServerIP, vmPassword string, vmDepend
 	return cmd, err
 }
 
-func getK3sKubeconfig(ctx *pulumi.Context, template VMTemplate, serverIP, vmPassword, lbIP string, vmDependency pulumi.Resource) (*remote.Command, error) {
+func getK3sKubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, vmDependency pulumi.Resource) error {
 	resourceName := fmt.Sprintf("k3s-kubeconfig-%s", strings.ReplaceAll(serverIP, ".", "-"))
 
 	kubeconfigCommand := fmt.Sprintf(`
@@ -346,11 +290,28 @@ func getK3sKubeconfig(ctx *pulumi.Context, template VMTemplate, serverIP, vmPass
 	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
 		Connection: &remote.ConnectionArgs{
 			Host:       pulumi.String(serverIP),
-			User:       pulumi.String(template.Username),
+			User:       pulumi.String("rajeshk"),
 			PrivateKey: pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
 			Password:   pulumi.String(vmPassword),
 		},
 		Create: pulumi.String(kubeconfigCommand),
 	}, pulumi.DependsOn([]pulumi.Resource{vmDependency}))
-	return cmd, err
+
+	if err != nil {
+		return err
+	}
+
+	kubeconfigPath := "./kubeconfig.yaml"
+	_, err = local.NewFile(ctx, "save-kubeconfig", &local.FileArgs{
+		Filename: pulumi.String(kubeconfigPath),
+		Content:  cmd.Stdout,
+	}, pulumi.DependsOn([]pulumi.Resource{cmd}),
+		pulumi.ReplaceOnChanges([]string{"content"}))
+
+	if err != nil {
+		return fmt.Errorf("failed to save kubeconfig locally: %w", err)
+	}
+	ctx.Export("kubeconfig", cmd.Stdout)
+	ctx.Log.Info("kubeconfig exported successfully", nil)
+	return nil
 }

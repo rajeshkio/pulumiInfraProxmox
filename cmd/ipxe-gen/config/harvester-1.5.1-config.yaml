@@ -1,0 +1,21 @@
+#cloud-config
+scheme_version: 1
+server_url: https://192.168.90.210:443
+token: harvester-cluster-1.5.1
+os:
+  ssh_authorized_keys:
+  - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIINH6/EGN6YmF3lOlXzBG/oPAo0dGpzlnky3RMQAMv5c rajeshkumar@Rajeshs-MacBook-Pro.local"
+  password: "YourSecurePassword123"
+  hostname: harvester-1.5.1-main
+install:
+  mode: create
+  management_interface:
+    interfaces:
+    - name: ens18
+    default_route: true
+    method: dhcp
+  device: /dev/sda
+  iso_url: https://releases.rancher.com/harvester/1.5.1/harvester-1.5.1-amd64.iso
+  vip: 192.168.90.210
+  vip_mode: static
+  data_disk: /dev/sdb
