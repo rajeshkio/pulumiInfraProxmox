@@ -11,11 +11,11 @@ import (
 )
 
 var serviceHandlers = map[string]ServiceHandler{
-	"k3s": handleK3sService,
-	//	"kubeadm":   handleKubeadmService,
+	"k3s":     handleK3sService,
+	"rke2":    handleRKE2Service,
 	"haproxy": handleHAProxyService,
+	//	"kubeadm":   handleKubeadmService,
 	// "harvester": handleHarvesterService,
-	// "rke2":      handleRKE2Service,
 	// "talos":     handleTalosService,
 }
 
@@ -313,5 +313,218 @@ func getK3sKubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, vm
 	}
 	ctx.Export("kubeconfig", cmd.Stdout)
 	ctx.Log.Info("kubeconfig exported successfully", nil)
+	return nil
+}
+
+
+// RKE2 Service Handler
+func handleRKE2Service(ctx *pulumi.Context, serviceCtx ServiceContext) error {
+	ctx.Log.Info(fmt.Sprintf("Installing RKE2 service on %d VMs", len(serviceCtx.VMs)), nil)
+
+	lbIPs, ok := serviceCtx.GlobalDeps["load-balancer-ips"].([]string)
+	if !ok {
+		return fmt.Errorf("rke2 server needs loadbalancer IP but they are not available")
+	}
+	lbIP := lbIPs[0]
+
+	ctx.Log.Info(fmt.Sprintf("installing rke2 server with LBIP: %s", lbIP), nil)
+	var rke2ServerToken pulumi.StringOutput
+	var firstServerIP string
+
+	for i, serverVM := range serviceCtx.VMs {
+		serverIP := serviceCtx.IPs[i]
+		isFirstServer := (i == 0)
+
+		ctx.Log.Info(fmt.Sprintf("Installing RKE2 on server %d: %s", i+1, serverIP), nil)
+
+		if isFirstServer {
+			firstServerIP = serverIP
+			ctx.Log.Info(fmt.Sprintf("installing rke2 on server %d: %s", i+1, serverIP), nil)
+
+			rke2Cmd, err := installRKE2Server(ctx, lbIP, serviceCtx.VMPassword, serverIP, serverVM, true, pulumi.String("").ToStringOutput(), nil)
+			if err != nil {
+				return fmt.Errorf("cannot install RKE2 server on first node %s: %w", serverIP, err)
+			}
+			tokenCmd, err := getRKE2Token(ctx, serverIP, serviceCtx.VMPassword, rke2Cmd)
+			if err != nil {
+				return fmt.Errorf("cannot get rke2 token: %w", err)
+			}
+			rke2ServerToken = tokenCmd.Stdout
+		} else {
+			_, err := installRKE2Server(ctx, lbIP, serviceCtx.VMPassword, serverIP, serverVM, false, rke2ServerToken, nil)
+			if err != nil {
+				return fmt.Errorf("cannot install rke2 on server %s: %w", serverIP, serverVM)
+			}
+		}
+	}
+	if firstServerIP != "" {
+		err := getRKE2Kubeconfig(ctx, firstServerIP, serviceCtx.VMPassword, lbIP, serviceCtx.VMs[0])
+		if err != nil {
+			return fmt.Errorf("failed to extract rke2 kubeconfig: %w", err)
+		}
+	}
+
+	ctx.Log.Info(fmt.Sprintf("RKE2 service installed on %d servers", len(serviceCtx.VMs)), nil)
+	return nil
+}
+
+// RKE2-specific installation functions
+func installRKE2Server(ctx *pulumi.Context, lbIP, vmPassword, serverIP string, vmDependency pulumi.Resource, isFirstServer bool, rke2Token pulumi.StringOutput, haproxyDependency pulumi.Resource) (*remote.Command, error) {
+	var rke2Command pulumi.StringInput
+
+	if isFirstServer {
+		// First server - initialize cluster
+		rke2Command = pulumi.Sprintf(`
+			# Set DNS resolver
+			sudo tee /etc/resolv.conf << 'EOF'
+nameserver 192.168.90.1
+EOF
+
+			# Create RKE2 config directory
+			sudo mkdir -p /etc/rancher/rke2
+
+			# Create RKE2 server configuration
+			sudo tee /etc/rancher/rke2/config.yaml << 'EOF'
+token: bootstrap-token
+cluster-init: true
+tls-san:
+  - %s
+  - $(hostname -I | awk '{print $1}')
+write-kubeconfig-mode: "0644"
+EOF
+
+			# Download and install RKE2
+			curl -sfL https://get.rke2.io | sudo sh -
+
+			# Enable and start RKE2 server
+			sudo systemctl enable rke2-server.service
+			sudo systemctl start rke2-server.service
+
+			# Wait for RKE2 to be ready
+			sleep 120
+			
+			# Wait for all nodes to be ready
+			sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml wait --for=condition=Ready nodes --all --timeout=300s
+		`, lbIP)
+	} else {
+		// Additional servers - join cluster
+		rke2Command = pulumi.Sprintf(`
+			# Set DNS resolver
+			sudo tee /etc/resolv.conf << 'EOF'
+nameserver 192.168.90.1
+EOF
+
+			# Wait for first server to be ready
+			until curl -k -s https://%s:9345/ping; do
+				echo "Waiting for first RKE2 server to be ready..."
+				sleep 10
+			done
+
+			# Create RKE2 config directory
+			sudo mkdir -p /etc/rancher/rke2
+
+			# Create RKE2 server configuration for joining
+			sudo tee /etc/rancher/rke2/config.yaml << 'EOF'
+server: https://%s:9345
+token: %s
+tls-san:
+  - %s
+  - $(hostname -I | awk '{print $1}')
+write-kubeconfig-mode: "0644"
+EOF
+
+			# Download and install RKE2
+			curl -sfL https://get.rke2.io | sudo sh -
+
+			# Enable and start RKE2 server
+			sudo systemctl enable rke2-server.service
+			sudo systemctl start rke2-server.service
+
+			echo "RKE2 server joined cluster successfully"
+		`, lbIP, lbIP, rke2Token, lbIP)
+	}
+
+	resourceName := fmt.Sprintf("rke2-server-%s", strings.ReplaceAll(serverIP, ".", "-"))
+	dependencies := []pulumi.Resource{vmDependency}
+	if haproxyDependency != nil {
+		dependencies = append(dependencies, haproxyDependency)
+		ctx.Log.Info(fmt.Sprintf("RKE2 server %s will wait for HAProxy installation", serverIP), nil)
+	}
+
+	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
+		Connection: &remote.ConnectionArgs{
+			Host:       pulumi.String(serverIP),
+			User:       pulumi.String("rajeshk"),
+			PrivateKey: pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+			Password:   pulumi.String(vmPassword),
+		},
+		Create: rke2Command,
+	}, pulumi.DependsOn(dependencies))
+	return cmd, err
+}
+
+func getRKE2Token(ctx *pulumi.Context, firstServerIP, vmPassword string, vmDependency pulumi.Resource) (*remote.Command, error) {
+	resourceName := fmt.Sprintf("rke2-token-%s", strings.ReplaceAll(firstServerIP, ".", "-"))
+	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
+		Connection: &remote.ConnectionArgs{
+			Host:       pulumi.String(firstServerIP),
+			User:       pulumi.String("rajeshk"),
+			PrivateKey: pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+			Password:   pulumi.String(vmPassword),
+		},
+		Create: pulumi.String(`
+			# Wait for RKE2 to be fully ready and token file to exist
+			while [ ! -f /var/lib/rancher/rke2/server/node-token ]; do
+				echo "Waiting for RKE2 token file..."
+				sleep 5
+			done
+
+			# Wait a bit more to ensure RKE2 is fully initialized
+			sleep 10
+
+			sudo cat /var/lib/rancher/rke2/server/node-token
+		`),
+	}, pulumi.DependsOn([]pulumi.Resource{vmDependency}))
+	return cmd, err
+}
+
+func getRKE2Kubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, vmDependency pulumi.Resource) error {
+	resourceName := fmt.Sprintf("rke2-kubeconfig-%s", strings.ReplaceAll(serverIP, ".", "-"))
+
+	kubeconfigCommand := fmt.Sprintf(`
+		while [ ! -f /etc/rancher/rke2/rke2.yaml ]; do
+			echo "Waiting for RKE2 kubeconfig..." >&2 
+			sleep 5
+		done
+		sleep 2
+		sudo cat /etc/rancher/rke2/rke2.yaml | sed 's/127.0.0.1:6443/%s:6443/g'`, lbIP)
+
+	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
+		Connection: &remote.ConnectionArgs{
+			Host:       pulumi.String(serverIP),
+			User:       pulumi.String("rajeshk"),
+			PrivateKey: pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+			Password:   pulumi.String(vmPassword),
+		},
+		Create: pulumi.String(kubeconfigCommand),
+	}, pulumi.DependsOn([]pulumi.Resource{vmDependency}))
+
+	if err != nil {
+		return err
+	}
+
+	kubeconfigPath := "./rke2-kubeconfig.yaml"
+	_, err = local.NewFile(ctx, "save-rke2-kubeconfig", &local.FileArgs{
+		Filename: pulumi.String(kubeconfigPath),
+		Content:  cmd.Stdout,
+	}, pulumi.DependsOn([]pulumi.Resource{cmd}),
+		pulumi.ReplaceOnChanges([]string{"content"}))
+
+	if err != nil {
+		return fmt.Errorf("failed to save rke2 kubeconfig locally: %w", err)
+	}
+	ctx.Export("rke2-kubeconfig", cmd.Stdout)
+	ctx.Export("rke2-kubeconfigPath", pulumi.String(kubeconfigPath))
+	ctx.Log.Info("RKE2 kubeconfig exported successfully", nil)
 	return nil
 }

@@ -54,5 +54,11 @@ func executeServices(ctx *pulumi.Context, services *Services, vmGroups map[strin
 			return fmt.Errorf("failed to execute K3s service: %w", err)
 		}
 	}
+	if services.RKE2 != nil && services.RKE2.Enabled {
+		err := executeService(ctx, "rke2", services.RKE2, vmGroups, globalDeps, vmPassword)
+		if err != nil {
+			return fmt.Errorf("failed to execute RKE2 service: %w", err)
+		}
+	}
 	return nil
 }

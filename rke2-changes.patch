@@ -1,0 +1,487 @@
+diff --git a/Pulumi.dev.yaml b/Pulumi.dev.yaml
+index 07f047e..026f2bb 100644
+--- a/Pulumi.dev.yaml
++++ b/Pulumi.dev.yaml
+@@ -54,26 +54,14 @@ config:
+       count: 1 # Just one VM for testing
+       memory: 40000 # Harvester needs more RAM
+       cpu: 16
+-      disksize: 300
++      disksize: 600
+       ipconfig: "static"
+       ips: ["192.168.90.210"] # Make sure this IP is available
+       gateway: "192.168.90.1"
+-      proxmoxNode: proxmox-3
++      proxmoxNode: proxmox1
+       ipxeConfig:
+         version: "v1.5.1"
+-        isoFileName: "harvester-ipxe.iso"
++        isoFileName: "harvester-ipxe-https.iso"
+       actions:
+         - type: "configure-ipxe-boot"
+-      #   bootServerUrl: "https://ipxe-server.rajesh-kumar.in/boot"
+-      #   baseUrl: "https://ipxe-server.rajesh-kumar.in/iso/harvester"
+-      #   osType: "harvester"
+-      #   version: "v1.4.1"
+-      #   configUrl: "https://ipxe-server.rajesh-kumar.in/config/harvester-config.yaml"
+-      #   kernelParams:
+-      #     - "ip=dhcp"
+-      #     - "console=tty1"
+-      #   autoInstall: true
+-      #   isoFileName: "harvester-ipxe.iso"
+-      # actions:
+-      #   - type: "configure-ipxe-boot"
+   proxmox-k3s-cluster:gateway: 192.168.90.1
+diff --git a/README.md b/README.md
+index ea88cda..1ffb271 100644
+--- a/README.md
++++ b/README.md
+@@ -53,21 +53,23 @@ Choose exactly what you want to deploy:
+ ```yaml
+ features:
+   loadbalancer: true # HAProxy load balancer
+-  k3s: true # Kubernetes cluster
++  k3s: true # K3s Kubernetes cluster (lightweight)
++  rke2: false # RKE2 Kubernetes cluster (security-focused)
+   harvester: false # Harvester HCI platform
+ ```
+ 
+ ### 📦 Available Components
+ 
+-- **HAProxy Load Balancer:** Ubuntu-based with automatic backend discovery
+-- **K3s Kubernetes Cluster:** High-availability with 3+ server nodes
++- **HAProxy Load Balancer:** Ubuntu-based with automatic backend discovery for K3s/RKE2
++- **K3s Kubernetes Cluster:** Lightweight HA cluster with 3+ server nodes
++- **RKE2 Kubernetes Cluster:** Security-focused HA cluster with 3+ server nodes
+ - **Harvester Nodes:** iPXE-booted hyperconverged infrastructure
+ 
+ ### 🔄 Smart Dependency Management
+ 
+-- HAProxy automatically discovers K3s server IPs
+-- K3s waits for load balancer before starting
+-- Kubeconfig extraction waits for K3s cluster readiness
++- HAProxy automatically discovers K3s/RKE2 server IPs
++- K3s/RKE2 waits for load balancer before starting
++- Kubeconfig extraction waits for cluster readiness
+ - All dependencies resolved automatically with proper sequencing
+ 
+ ## ⚙️ Prerequisites
+@@ -77,7 +79,7 @@ features:
+ - Proxmox VE server with API access
+ - VM Templates:
+   - **Ubuntu 22.04** cloud template (VM ID 9000) for load balancer
+-  - **SLE Micro** template (VM ID 9001) for K3s servers
++  - **SLE Micro** template (VM ID 9001) for K3s/RKE2 servers
+   - **Harvester iPXE ISO** for Harvester nodes
+ - Network range with static IP allocation capability
+ - NFS or local storage for VM creation
+@@ -163,9 +165,24 @@ pulumi up
+ ### 🚀 K3s Development Environment
+ 
+ ```bash
+-# Just Kubernetes cluster with load balancer
++# Just K3s cluster with load balancer
+ pulumi config set-all --path features.loadbalancer=true \
+                      --path features.k3s=true \
++                     --path features.rke2=false \
++                     --path features.harvester=false
++pulumi up
++```
++
++### 🏢 RKE2 Production Environment
++
++```bash
++# Security-focused RKE2 cluster with load balancer
++pulumi config set-all --path features.loadbalancer=true \
++                     --path features.k3s=false \
++                     --path features.rke2=true \
++                     --path features.harvester=false
++pulumi up
++```
+                      --path features.harvester=false
+ pulumi up
+ ```
+diff --git a/handlers.go b/handlers.go
+index 80c6001..4037b06 100644
+--- a/handlers.go
++++ b/handlers.go
+@@ -11,10 +11,12 @@ import (
+ )
+ 
+ var actionHandlers = map[string]ActionHandler{
+-	"install-haproxy":     handleInstallHAProxy,
+-	"install-k3s-server":  handleInstallK3Sserver,
+-	"get-kubeconfig":      handleGetKubeconfig,
+-	"configure-ipxe-boot": handleConfigureIPXEBoot,
++	"install-haproxy":        handleInstallHAProxy,
++	"install-k3s-server":     handleInstallK3Sserver,
++	"install-rke2-server":    handleInstallRKE2Server,
++	"get-kubeconfig":         handleGetKubeconfig,
++	"get-rke2-kubeconfig":    handleGetRKE2Kubeconfig,
++	"configure-ipxe-boot":    handleConfigureIPXEBoot,
+ }
+ 
+ func filterEnabledTemplates(ctx *pulumi.Context, templates []VMTemplate, features Features) []VMTemplate {
+@@ -33,6 +35,11 @@ func filterEnabledTemplates(ctx *pulumi.Context, templates []VMTemplate, feature
+ 				//			fmt.Printf("DEBUG: Including k3s-server template\n")
+ 				enabled = append(enabled, template)
+ 			}
++		case "rke2-server":
++			if features.RKE2 {
++				//			fmt.Printf("DEBUG: Including rke2-server template\n")
++				enabled = append(enabled, template)
++			}
+ 		case "harvester-node":
+ 			if features.Harvester { // Only include if true
+ 				//			fmt.Printf("DEBUG: Including harvester-node template\n")
+@@ -49,17 +56,26 @@ func filterEnabledTemplates(ctx *pulumi.Context, templates []VMTemplate, feature
+ 
+ func handleInstallHAProxy(ctx *pulumi.Context, actionctx ActionContext) error {
+ 
+-	k3sServerIPs, ok := actionctx.GlobalDeps["k3s-server-ips"].([]string)
+-	if !ok {
+-		return fmt.Errorf("haproxy needs k3s server ips but they are not available")
++	// Check for K3s or RKE2 server IPs
++	var serverIPs []string
++	var serverType string
++
++	if k3sIPs, ok := actionctx.GlobalDeps["k3s-server-ips"].([]string); ok {
++		serverIPs = k3sIPs
++		serverType = "k3s"
++	} else if rke2IPs, ok := actionctx.GlobalDeps["rke2-server-ips"].([]string); ok {
++		serverIPs = rke2IPs
++		serverType = "rke2"
++	} else {
++		return fmt.Errorf("haproxy needs either k3s-server-ips or rke2-server-ips but neither are available")
+ 	}
++
+ 	lbIP := actionctx.IPs[0]
+ 	lbVM := actionctx.VMs[0]
+ 
+-	ctx.Log.Info(fmt.Sprintf("installing haproxy on %s with backends: %v", lbIP, k3sServerIPs), nil)
+-	//	ctx.Log.Info(fmt.Sprintf("VM dependency: %v", lbVM.ID()), nil)
++	ctx.Log.Info(fmt.Sprintf("installing haproxy on %s for %s with backends: %v", lbIP, serverType, serverIPs), nil)
+ 
+-	cmd, err := installHaProxy(ctx, lbIP, lbVM, k3sServerIPs)
++	cmd, err := installHaProxy(ctx, lbIP, lbVM, serverIPs, serverType)
+ 	if err != nil {
+ 		ctx.Log.Error(fmt.Sprintf("HAProxy installation failed: %v", err), nil)
+ 	}
+@@ -144,6 +160,93 @@ func handleConfigureIPXEBoot(ctx *pulumi.Context, actionCtx ActionContext) error
+ 	return nil
+ }
+ 
++func handleInstallRKE2Server(ctx *pulumi.Context, actionctx ActionContext) error {
++	ctx.Log.Info(fmt.Sprintf("Auth method for rke2 servers: %s", actionctx.Templates.AuthMethod), nil)
++	ctx.Log.Info(fmt.Sprintf("Username: %s", actionctx.Templates.Username), nil)
++
++	lbIPs, ok := actionctx.GlobalDeps["loadbalancer-ips"].([]string)
++	if !ok {
++		return fmt.Errorf("rke2 server needs loadbalancer IP but its not available")
++	}
++
++	var haproxyCmd pulumi.Resource
++	if haproxyResource, exists := actionctx.GlobalDeps["haproxy-install-command"]; exists {
++		if cmd, ok := haproxyResource.(*remote.Command); ok {
++			haproxyCmd = cmd
++		}
++	}
++	lbIP := lbIPs[0]
++	ctx.Log.Info(fmt.Sprintf("installing rke2 server with LBIP: %s", lbIP), nil)
++
++	var rke2ServerToken pulumi.StringOutput
++	var firstServerIP string
++
++	for i, serverVM := range actionctx.VMs {
++		serverIP := actionctx.IPs[i]
++		isFirstServer := (i == 0)
++
++		ctx.Log.Info(fmt.Sprintf("Installing RKE2 on server %d: %s", i+1, serverIP), nil)
++
++		if isFirstServer {
++			firstServerIP = serverIP
++			ctx.Log.Info(fmt.Sprintf("installing rke2 on server %d: %s", i+1, serverIP), nil)
++
++			rke2Cmd, err := installRKE2Server(ctx, lbIP, actionctx.VMPassword, serverIP, serverVM, true, pulumi.String("").ToStringOutput(), haproxyCmd)
++			if err != nil {
++				return fmt.Errorf("cannot install RKE2 server on first node %s: %w", serverIP, err)
++			}
++
++			tokenCmd, err := getRKE2Token(ctx, serverIP, actionctx.VMPassword, rke2Cmd)
++			if err != nil {
++				return fmt.Errorf("cannot get rke2 token: %w", err)
++			}
++			rke2ServerToken = tokenCmd.Stdout
++		} else {
++			_, err := installRKE2Server(ctx, lbIP, actionctx.VMPassword, serverIP, serverVM, false, rke2ServerToken, haproxyCmd)
++			if err != nil {
++				return fmt.Errorf("cannot install rke2 on server %s: %w", serverIP, serverVM)
++			}
++		}
++	}
++
++	actionctx.GlobalDeps["rke2-first-server-ip"] = firstServerIP
++	actionctx.GlobalDeps["rke2-loadbalancer-ip"] = lbIP
++	ctx.Log.Info(fmt.Sprintf("RKE2 installation initiated on %d servers", len(actionctx.VMs)), nil)
++	return nil
++}
++
++func handleGetRKE2Kubeconfig(ctx *pulumi.Context, actionctx ActionContext) error {
++	lbIPs, ok := actionctx.GlobalDeps["loadbalancer-ips"].([]string)
++	if !ok {
++		return fmt.Errorf("rke2 kubeconfig needs loadbalancer IP but it's not available")
++	}
++
++	firstServerIP := actionctx.IPs[0]
++	firstServerVM := actionctx.VMs[0]
++	lbIP := lbIPs[0]
++
++	ctx.Log.Info(fmt.Sprintf("Getting RKE2 kubeconfig from %s with LB IP %s", firstServerIP, lbIP), nil)
++
++	cmd, err := getRKE2Kubeconfig(ctx, actionctx.Templates, firstServerIP, actionctx.VMPassword, lbIP, firstServerVM)
++	if err != nil {
++		return fmt.Errorf("failed to get rke2 kubeconfig: %w", err)
++	}
++
++	kubeconfigPath := "./rke2-kubeconfig.yaml"
++	_, err = local.NewFile(ctx, "save-rke2-kubeconfig", &local.FileArgs{
++		Filename: pulumi.String(kubeconfigPath),
++		Content:  cmd.Stdout,
++	}, pulumi.DependsOn([]pulumi.Resource{cmd}),
++		pulumi.ReplaceOnChanges([]string{"content"}))
++	if err != nil {
++		return fmt.Errorf("failed to save rke2 kubeconfig locally: %w", err)
++	}
++	ctx.Export("rke2-kubeconfig", cmd.Stdout)
++	ctx.Export("rke2-kubeconfigPath", pulumi.String(kubeconfigPath))
++	ctx.Log.Info("RKE2 kubeconfig exported successfully", nil)
++	return nil
++}
++
+ func handleGetKubeconfig(ctx *pulumi.Context, actionctx ActionContext) error {
+ 	lbIPs, ok := actionctx.GlobalDeps["loadbalancer-ips"].([]string)
+ 	if !ok {
+@@ -175,12 +278,12 @@ func handleGetKubeconfig(ctx *pulumi.Context, actionctx ActionContext) error {
+ 	return nil
+ }
+ 
+-func installHaProxy(ctx *pulumi.Context, lbIP string, vmDependency pulumi.Resource, k3sServerIPs []string) (*remote.Command, error) {
++func installHaProxy(ctx *pulumi.Context, lbIP string, vmDependency pulumi.Resource, serverIPs []string, serverType string) (*remote.Command, error) {
+ 
+ 	ctx.Log.Info("Print from installHaProxy", nil)
+ 	var backendServers strings.Builder
+-	for i, serverIP := range k3sServerIPs {
+-		backendServers.WriteString(fmt.Sprintf("    server k3s-server-%d %s:6443 check\n", i+1, serverIP))
++	for i, serverIP := range serverIPs {
++		backendServers.WriteString(fmt.Sprintf("    server %s-server-%d %s:6443 check\n", serverType, i+1, serverIP))
+ 	}
+ 
+ 	haProxyConfig := fmt.Sprintf(`
+@@ -197,17 +300,17 @@ defaults
+     option tcplog
+     log global
+ 
+-# K3s API Server Load Balancer
+-frontend k3s-api
++# Kubernetes API Server Load Balancer (%s)
++frontend k8s-api
+     bind *:6443
+     mode tcp
+-    default_backend k3s-servers
++    default_backend k8s-servers
+ 
+-backend k3s-servers
++backend k8s-servers
+     mode tcp
+     balance roundrobin
+ %s
+-	`, backendServers.String())
++	`, serverType, backendServers.String())
+ 
+ 	installCmd := fmt.Sprintf(`
+ 		# Update package list
+@@ -232,8 +335,8 @@ EOF
+ 		sudo systemctl status haproxy --no-pager
+ 		
+ 		echo "HAProxy installed and configured successfully"
+-		echo "K3s API accessible via: https://%s:6443"
+-	`, haProxyConfig, lbIP)
++		echo "Kubernetes API (%s) accessible via: https://%s:6443"
++	`, haProxyConfig, serverType, lbIP)
+ 
+ 	resourceName := fmt.Sprintf("haproxy-install-%s", strings.ReplaceAll(lbIP, ".", "-"))
+ 
+@@ -354,3 +457,148 @@ func getK3sKubeconfig(ctx *pulumi.Context, template VMTemplate, serverIP, vmPass
+ 	}, pulumi.DependsOn([]pulumi.Resource{vmDependency}))
+ 	return cmd, err
+ }
++
++// RKE2-specific functions
++func installRKE2Server(ctx *pulumi.Context, lbIP, vmPassword, serverIP string, vmDependency pulumi.Resource, isFirstServer bool, rke2Token pulumi.StringOutput, haproxyDependency pulumi.Resource) (*remote.Command, error) {
++	var rke2Command pulumi.StringInput
++
++	if isFirstServer {
++		// First server - initialize cluster
++		rke2Command = pulumi.Sprintf(`
++			# Set DNS resolver
++			sudo tee /etc/resolv.conf << 'EOF'
++nameserver 192.168.90.1
++EOF
++
++			# Create RKE2 config directory
++			sudo mkdir -p /etc/rancher/rke2
++
++			# Create RKE2 server configuration
++			sudo tee /etc/rancher/rke2/config.yaml << 'EOF'
++server: https://%s:9345
++token: bootstrap-token
++cluster-init: true
++tls-san:
++  - %s
++  - $(hostname -I | awk '{print $1}')
++write-kubeconfig-mode: "0644"
++EOF
++
++			# Download and install RKE2
++			curl -sfL https://get.rke2.io | sudo sh -
++
++			# Enable and start RKE2 server
++			sudo systemctl enable rke2-server.service
++			sudo systemctl start rke2-server.service
++
++			# Wait for RKE2 to be ready
++			sleep 120
++			
++			# Wait for all nodes to be ready
++			sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml wait --for=condition=Ready nodes --all --timeout=300s
++		`, lbIP, lbIP)
++	} else {
++		// Additional servers - join cluster
++		rke2Command = pulumi.Sprintf(`
++			# Set DNS resolver
++			sudo tee /etc/resolv.conf << 'EOF'
++nameserver 192.168.90.1
++EOF
++
++			# Wait for first server to be ready
++			until curl -k -s https://%s:9345/ping; do
++				echo "Waiting for first RKE2 server to be ready..."
++				sleep 10
++			done
++
++			# Create RKE2 config directory
++			sudo mkdir -p /etc/rancher/rke2
++
++			# Create RKE2 server configuration for joining
++			sudo tee /etc/rancher/rke2/config.yaml << 'EOF'
++server: https://%s:9345
++token: %s
++tls-san:
++  - %s
++  - $(hostname -I | awk '{print $1}')
++write-kubeconfig-mode: "0644"
++EOF
++
++			# Download and install RKE2
++			curl -sfL https://get.rke2.io | sudo sh -
++
++			# Enable and start RKE2 server
++			sudo systemctl enable rke2-server.service
++			sudo systemctl start rke2-server.service
++
++			echo "RKE2 server joined cluster successfully"
++		`, lbIP, lbIP, rke2Token, lbIP)
++	}
++
++	resourceName := fmt.Sprintf("rke2-server-%s", strings.ReplaceAll(serverIP, ".", "-"))
++	dependencies := []pulumi.Resource{vmDependency}
++	if haproxyDependency != nil {
++		dependencies = append(dependencies, haproxyDependency)
++		ctx.Log.Info(fmt.Sprintf("RKE2 server %s will wait for HAProxy installation", serverIP), nil)
++	}
++
++	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
++		Connection: &remote.ConnectionArgs{
++			Host:       pulumi.String(serverIP),
++			User:       pulumi.String("rajeshk"),
++			PrivateKey: pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
++			Password:   pulumi.String(vmPassword),
++		},
++		Create: rke2Command,
++	}, pulumi.DependsOn(dependencies))
++	return cmd, err
++}
++
++func getRKE2Token(ctx *pulumi.Context, firstServerIP, vmPassword string, vmDependency pulumi.Resource) (*remote.Command, error) {
++	resourceName := fmt.Sprintf("rke2-token-%s", strings.ReplaceAll(firstServerIP, ".", "-"))
++	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
++		Connection: &remote.ConnectionArgs{
++			Host:       pulumi.String(firstServerIP),
++			User:       pulumi.String("rajeshk"),
++			PrivateKey: pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
++			Password:   pulumi.String(vmPassword),
++		},
++		Create: pulumi.String(`
++			# Wait for RKE2 to be fully ready and token file to exist
++			while [ ! -f /var/lib/rancher/rke2/server/node-token ]; do
++				echo "Waiting for RKE2 token file..."
++				sleep 5
++			done
++
++			# Wait a bit more to ensure RKE2 is fully initialized
++			sleep 10
++
++			sudo cat /var/lib/rancher/rke2/server/node-token
++		`),
++	}, pulumi.DependsOn([]pulumi.Resource{vmDependency}))
++	return cmd, err
++}
++
++func getRKE2Kubeconfig(ctx *pulumi.Context, template VMTemplate, serverIP, vmPassword, lbIP string, vmDependency pulumi.Resource) (*remote.Command, error) {
++	resourceName := fmt.Sprintf("rke2-kubeconfig-%s", strings.ReplaceAll(serverIP, ".", "-"))
++
++	kubeconfigCommand := fmt.Sprintf(`
++		while [ ! -f /etc/rancher/rke2/rke2.yaml ]; do
++			echo "Waiting for RKE2 kubeconfig..." >&2 
++			sleep 5
++		done
++		sleep 2
++
++		sudo cat /etc/rancher/rke2/rke2.yaml | sed 's/127.0.0.1:6443/%s:6443/g'`, lbIP)
++
++	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
++		Connection: &remote.ConnectionArgs{
++			Host:       pulumi.String(serverIP),
++			User:       pulumi.String(template.Username),
++			PrivateKey: pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
++			Password:   pulumi.String(vmPassword),
++		},
++		Create: pulumi.String(kubeconfigCommand),
++	}, pulumi.DependsOn([]pulumi.Resource{vmDependency}))
++	return cmd, err
++}
+diff --git a/types.go b/types.go
+index a2f489b..e97d4f4 100644
+--- a/types.go
++++ b/types.go
+@@ -8,6 +8,7 @@ import (
+ type Features struct {
+ 	Loadbalancer bool `yaml:"loadbalancer"`
+ 	K3s          bool `yaml:"k3s"`
++	RKE2         bool `yaml:"rke2"`
+ 	Harvester    bool `yaml:"harvester"`
+ }
+ 
+diff --git a/utils.go b/utils.go
+index 44e55c7..f3e28b5 100644
+--- a/utils.go
++++ b/utils.go
+@@ -33,6 +33,8 @@ func checkRequiredEnvVars() error {
+ 
+ func setupProxmoxProvider(ctx *pulumi.Context) (*proxmoxve.Provider, error) {
+ 	provider, err := proxmoxve.NewProvider(ctx, "proxmox-provider", &proxmoxve.ProviderArgs{
++		Endpoint: pulumi.String(os.Getenv("PROXMOX_VE_ENDPOINT")),
++		ApiToken: pulumi.String(os.Getenv("PROXMOX_VE_API_TOKEN")),
+ 		Ssh: &proxmoxve.ProviderSshArgs{
+ 			PrivateKey: pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+ 			Username:   pulumi.String(os.Getenv("PROXMOX_VE_SSH_USERNAME")),
