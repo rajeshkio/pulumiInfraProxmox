@@ -17,7 +17,7 @@ func main() {
 		if err != nil {
 			return fmt.Errorf("failed to setup Proxmox provider: %w", err)
 		}
-		vmPassword, _, vms, services, err := loadConfig(ctx)
+		vmPassword, _, vms, services, vmCreationConfig, err := loadConfig(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)
 		}
@@ -29,7 +29,7 @@ func main() {
 
 		ctx.Log.Info(fmt.Sprintf("=== PHASE 1: Infrastructure - Creating %d VM groups ===", len(vms)), nil)
 
-		vmGroups, err := createVMs(ctx, provider, vms, vmPassword)
+		vmGroups, err := createVMs(ctx, provider, vms, vmPassword, vmCreationConfig)
 		if err != nil {
 			return fmt.Errorf("failed to create VMs: %s", err)
 		}
@@ -64,11 +64,7 @@ func main() {
 		} else {
 			ctx.Log.Info("No services configured - VMs created without software installation", nil)
 		}
-		ctx.Log.Info(fmt.Sprintf("=== DEPLOYMENT COMPLETE ==="), nil)
-		ctx.Log.Info(fmt.Sprintf("Infrastructure: %d VMs created", totalVMs), nil)
-
-		// Final summary
-		ctx.Log.Info(fmt.Sprintf("=== DEPLOYMENT COMPLETE ==="), nil)
+		ctx.Log.Info("=== DEPLOYMENT COMPLETE ===", nil)
 		ctx.Log.Info(fmt.Sprintf("Infrastructure: %d VMs created", totalVMs), nil)
 
 		if services != nil {

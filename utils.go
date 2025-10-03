@@ -45,7 +45,7 @@ func setupProxmoxProvider(ctx *pulumi.Context) (*proxmoxve.Provider, error) {
 	return provider, nil
 }
 
-func loadConfig(ctx *pulumi.Context) (string, string, []VM, *Services, error) {
+func loadConfig(ctx *pulumi.Context) (string, string, []VM, *Services, *VMCreationConfig, error) {
 	cfg := config.New(ctx, "")
 	vmPassword := cfg.Require("password")
 	gateway := cfg.Require("gateway")
@@ -56,15 +56,30 @@ func loadConfig(ctx *pulumi.Context) (string, string, []VM, *Services, error) {
 	var services Services
 	cfg.RequireObject("services", &services)
 
+	// Load VM creation config with defaults
+	var vmCreationConfig VMCreationConfig
+	cfg.TryObject("vmCreation", &vmCreationConfig)
+	
+	// Set defaults if not provided
+	if vmCreationConfig.BatchSize == 0 {
+		vmCreationConfig.BatchSize = 3
+	}
+	if vmCreationConfig.MaxRetries == 0 {
+		vmCreationConfig.MaxRetries = 5
+	}
+	if vmCreationConfig.BatchDelay == 0 {
+		vmCreationConfig.BatchDelay = 10
+	}
+
 	for i := range vms {
 		if vms[i].TemplateID == 0 {
-			return "", "", nil, nil, fmt.Errorf("VM '%s' has no templateId set. Template ID is required and must be between 100-2147483647", vms[i].Name)
+			return "", "", nil, nil, nil, fmt.Errorf("VM '%s' has no templateId set. Template ID is required and must be between 100-2147483647", vms[i].Name)
 		}
 		if vms[i].Name == "" {
-			return "", "", nil, nil, fmt.Errorf("VM at index %d has no name set", i)
+			return "", "", nil, nil, nil, fmt.Errorf("VM at index %d has no name set", i)
 		}
 		if len(vms[i].IPs) == 0 {
-			return "", "", nil, nil, fmt.Errorf("VM '%s' has no IPs configured", vms[i].Name)
+			return "", "", nil, nil, nil, fmt.Errorf("VM '%s' has no IPs configured", vms[i].Name)
 		}
 		if vms[i].BootMethod == "" {
 			vms[i].BootMethod = "cloud-init"
@@ -93,7 +108,7 @@ func loadConfig(ctx *pulumi.Context) (string, string, []VM, *Services, error) {
 	if len(enabledServices) > 0 {
 		ctx.Log.Info(fmt.Sprintf("Services: Found enabled services: %v", enabledServices), nil)
 	}
-	return vmPassword, gateway, vms, &services, nil
+	return vmPassword, gateway, vms, &services, &vmCreationConfig, nil
 }
 
 func getEnabledServices(services *Services) []string {
@@ -119,29 +134,69 @@ func getEnabledServices(services *Services) []string {
 	return enabledServices
 }
 
-func createVMs(ctx *pulumi.Context, provider *proxmoxve.Provider, vms []VM, vmPassword string) (map[string][]*vm.VirtualMachine, error) {
+func createVMs(ctx *pulumi.Context, provider *proxmoxve.Provider, vms []VM, vmPassword string, vmCreationConfig *VMCreationConfig) (map[string][]*vm.VirtualMachine, error) {
 	vmGroups := make(map[string][]*vm.VirtualMachine)
 
+	// Track last VM created per template for dependency chaining
+	lastVMPerTemplate := make(map[int64]*vm.VirtualMachine)
+
+	// Process each VM group
 	for _, vmDef := range vms {
-		ctx.Log.Info(fmt.Sprintf("Creating VM group '%s' with %d VMs", vmDef.Name, vmDef.Count), nil)
+		count := vmDef.Count
+		
+		// Skip if count is 0
+		if count == 0 {
+			ctx.Log.Info(fmt.Sprintf("Skipping VM group '%s' (count is 0)", vmDef.Name), nil)
+			continue
+		}
+
+		ctx.Log.Info(fmt.Sprintf("Creating VM group '%s' (%d VMs from template %d)", 
+			vmDef.Name, count, vmDef.TemplateID), nil)
 
 		var groupVMs []*vm.VirtualMachine
-		count := vmDef.Count
-		if count == 0 {
-			count = 1
-		}
-
+		
 		for i := range count {
-			vm, err := createVMWithRetry(ctx, provider, i, vmDef, vmDef.ProxmoxNode, vmDef.Gateway, vmPassword, 3)
+			vmName := fmt.Sprintf("%s-%d", vmDef.Name, i)
+			
+			// Get dependency on last VM from same template
+			var dependsOn []pulumi.Resource
+			if lastVM, exists := lastVMPerTemplate[vmDef.TemplateID]; exists {
+				dependsOn = []pulumi.Resource{lastVM}
+				ctx.Log.Info(fmt.Sprintf("  [%d/%d] %s (waits for previous VM)", i+1, count, vmName), nil)
+			} else {
+				ctx.Log.Info(fmt.Sprintf("  [%d/%d] %s (first from template %d)", i+1, count, vmName, vmDef.TemplateID), nil)
+			}
+			
+			vmInstance, err := createVMWithRetry(
+				ctx,
+				provider,
+				i,
+				vmDef,
+				vmDef.ProxmoxNode,
+				vmDef.Gateway,
+				vmPassword,
+				vmCreationConfig.MaxRetries,
+				dependsOn,
+			)
+			
 			if err != nil {
-				return nil, fmt.Errorf("failed to create VM %s-%d: %w", vmDef.Name, i, err)
+				return nil, fmt.Errorf("failed to create VM %s: %w", vmName, err)
 			}
 
-			groupVMs = append(groupVMs, vm)
-			ctx.Log.Info(fmt.Sprintf("Created VM: %s-%d", vmDef.Name, i), nil)
+			groupVMs = append(groupVMs, vmInstance)
+			
+			// Update last VM for this template
+			lastVMPerTemplate[vmDef.TemplateID] = vmInstance
 		}
+		
 		vmGroups[vmDef.Name] = groupVMs
 	}
+
+	totalVMs := 0
+	for _, vms := range vmGroups {
+		totalVMs += len(vms)
+	}
+	ctx.Log.Info(fmt.Sprintf("✓ All %d VMs queued (dependencies set)", totalVMs), nil)
 	return vmGroups, nil
 }
 

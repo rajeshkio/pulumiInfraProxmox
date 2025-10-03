@@ -60,5 +60,17 @@ func executeServices(ctx *pulumi.Context, services *Services, vmGroups map[strin
 			return fmt.Errorf("failed to execute RKE2 service: %w", err)
 		}
 	}
+	if services.Kubeadm != nil && services.Kubeadm.Enabled {
+		err := executeService(ctx, "kubeadm", services.Kubeadm, vmGroups, globalDeps, vmPassword)
+		if err != nil {
+			return fmt.Errorf("failed to execute Kubeadm service: %w", err)
+		}
+	}
+	if services.Harvester != nil && services.Harvester.Enabled {
+		err := executeService(ctx, "harvester", services.Harvester, vmGroups, globalDeps, vmPassword)
+		if err != nil {
+			return fmt.Errorf("failed to execute Harvester service: %w", err)
+		}
+	}
 	return nil
 }

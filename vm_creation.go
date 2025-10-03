@@ -11,61 +11,69 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
-func isProxmoxLockError(err error) bool {
+func isDiskResizeError(err error) bool {
 	if err == nil {
 		return false
 	}
 
-	errStr := strings.ToLower(err.Error())
-	return strings.Contains(errStr, "cfs-lock") || strings.Contains(errStr, "lock request timeout") || strings.Contains(errStr, "storage") && strings.Contains(errStr, "lock")
+	return strings.Contains(err.Error(), "disk resize failure")
 }
 
-func createVMWithRetry(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int64, vmDef VM, nodeName, gateway, password string, maxRetries int) (*vm.VirtualMachine, error) {
+func createVMWithRetry(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int64, vmDef VM, nodeName, gateway, password string, maxRetries int, dependsOn []pulumi.Resource) (*vm.VirtualMachine, error) {
+	vmName := fmt.Sprintf("%s-%d", vmDef.Name, vmIndex)
+	var lastErr error
+
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		ctx.Log.Info(fmt.Sprintf("Creating VM %s-%d (attempt %d/%d)", vmDef.Name, vmIndex, attempt, maxRetries), nil)
-		vm, err := createVM(ctx, provider, vmIndex, vmDef, nodeName, gateway, password)
+		ctx.Log.Info(fmt.Sprintf("Creating VM %s (attempt %d/%d)", vmName, attempt, maxRetries), nil)
+
+		vmInstance, err := createVM(ctx, provider, vmIndex, vmDef, nodeName, gateway, password, dependsOn)
 
 		if err == nil {
 			if attempt > 1 {
-				ctx.Log.Info(fmt.Sprintf("VM %s-%d created successfully after %d attempts", vmDef.Name, vmIndex, attempt), nil)
+				ctx.Log.Info(fmt.Sprintf("✓ VM %s created after %d attempts", vmName, attempt), nil)
+			} else {
+				ctx.Log.Info(fmt.Sprintf("✓ VM %s created", vmName), nil)
 			}
-			return vm, nil
+			return vmInstance, nil
 		}
-		if isProxmoxLockError(err) && attempt < maxRetries {
-			waitTime := time.Duration(attempt*30) * time.Second
-			ctx.Log.Warn(fmt.Sprintf("Proxmox lock error on attempt %d: %v", attempt, err), nil)
-			ctx.Log.Info(fmt.Sprintf("Waiting %v before retry %d/%d...", waitTime, attempt+1, maxRetries), nil)
+
+		lastErr = err
+
+		// Disk resize error - don't retry
+		if isDiskResizeError(err) {
+			ctx.Log.Error(fmt.Sprintf("Disk size mismatch for %s", vmName), nil)
+			return nil, fmt.Errorf("disk size configuration error: %w", err)
+		}
+
+		// For any other error, retry with fixed delay
+		if attempt < maxRetries {
+			waitTime := 10 * time.Second
+			ctx.Log.Warn(fmt.Sprintf("⏳ VM creation failed: %v", err), nil)
+			ctx.Log.Info(fmt.Sprintf("   Waiting %v before retry %d/%d...", waitTime, attempt+1, maxRetries), nil)
 			time.Sleep(waitTime)
 			continue
 		}
-		if attempt == maxRetries {
-			return nil, fmt.Errorf("failed to create VM after %d attempts (last error: %w)", maxRetries, err)
-		} else {
-			return nil, fmt.Errorf("non-retryable error creating VM: %w", err)
-		}
 	}
-	return nil, fmt.Errorf("unexpected end of retry loop")
+
+	return nil, fmt.Errorf("failed to create VM %s after %d attempts: %w", vmName, maxRetries, lastErr)
 }
 
-func createVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int64, vmDef VM, nodeName, gateway, password string) (*vm.VirtualMachine, error) {
-
-	//	ctx.Log.Info(fmt.Sprintf("Creating VM with auth-method: %s, username: %s, password: %s", template.AuthMethod, template.Username, password), nil)
-	//	ctx.Log.Info(fmt.Sprintf("Template debug - Role: %s, AuthMethod: '%s', Username: %s", template.Role, template.AuthMethod, template.Username), nil)
+func createVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int64, vmDef VM, nodeName, gateway, password string, dependsOn []pulumi.Resource) (*vm.VirtualMachine, error) {
 
 	ctx.Log.Info(fmt.Sprintf("Creating VM %s on node %s (method: %s)",
 		fmt.Sprintf("%s-%d", vmDef.Name, vmIndex), nodeName, vmDef.BootMethod), nil)
 
 	switch vmDef.BootMethod {
 	case "ipxe":
-		return createIPXEVM(ctx, provider, vmIndex, vmDef, nodeName, gateway, password)
+		return createIPXEVM(ctx, provider, vmIndex, vmDef, nodeName, gateway, password, dependsOn)
 	case "cloud-init":
-		return createCloudInitVM(ctx, provider, vmIndex, vmDef, nodeName, gateway, password)
+		return createCloudInitVM(ctx, provider, vmIndex, vmDef, nodeName, gateway, password, dependsOn)
 	default:
 		return nil, fmt.Errorf("unsupported boot method: %s", vmDef.BootMethod)
 	}
 }
 
-func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int64, vmDef VM, nodeName, gateway, password string) (*vm.VirtualMachine, error) {
+func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int64, vmDef VM, nodeName, gateway, password string, dependsOn []pulumi.Resource) (*vm.VirtualMachine, error) {
 
 	var userAccount *vm.VirtualMachineInitializationUserAccountArgs
 	if vmDef.AuthMethod == "ssh-key" {
@@ -106,6 +114,21 @@ func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 	}
 	vmName := fmt.Sprintf("%s-%d", vmDef.Name, vmIndex)
 
+	// Build resource options with dependencies
+	opts := []pulumi.ResourceOption{
+		pulumi.Provider(provider),
+		pulumi.DeleteBeforeReplace(true),
+		pulumi.IgnoreChanges([]string{"clone"}),
+		pulumi.Timeouts(&pulumi.CustomTimeouts{
+			Create: "15m",
+		}),
+	}
+
+	// Add dependencies if provided
+	if len(dependsOn) > 0 {
+		opts = append(opts, pulumi.DependsOn(dependsOn))
+	}
+
 	vmInstance, err := vm.NewVirtualMachine(ctx, vmDef.Name+fmt.Sprintf("-%d", vmIndex), &vm.VirtualMachineArgs{
 		Name:     pulumi.String(vmName),
 		NodeName: pulumi.String(nodeName),
@@ -119,6 +142,11 @@ func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 		Clone: &vm.VirtualMachineCloneArgs{
 			NodeName: pulumi.String(nodeName),
 			VmId:     pulumi.Int(vmDef.TemplateID),
+			Full:     pulumi.Bool(true),
+			Retries:  pulumi.Int(3), // Retry clone operation up to 3 times
+		},
+		Cdrom: &vm.VirtualMachineCdromArgs{
+			FileId: pulumi.String("none"),
 		},
 		Disks: &vm.VirtualMachineDiskArray{
 			&vm.VirtualMachineDiskArgs{
@@ -150,19 +178,14 @@ func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 		},
 		Started: pulumi.Bool(true),
 		OnBoot:  pulumi.Bool(false),
-	}, pulumi.Provider(provider),
-		pulumi.DeleteBeforeReplace(true),
-		pulumi.IgnoreChanges([]string{"clone"}),
-		pulumi.Timeouts(&pulumi.CustomTimeouts{
-			Create: "15m",
-		}))
+	}, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return vmInstance, nil
 }
 
-func createIPXEVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int64, vmDef VM, nodeName, gateway, password string) (*vm.VirtualMachine, error) {
+func createIPXEVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int64, vmDef VM, nodeName, gateway, password string, dependsOn []pulumi.Resource) (*vm.VirtualMachine, error) {
 	if vmDef.IPXEConfig == nil {
 		return nil, fmt.Errorf("iPXE boot method requires ipxeconfig")
 	}
@@ -173,10 +196,23 @@ func createIPXEVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int
 		isoFileName = vmDef.IPXEConfig.ISOFileName
 	}
 
-	//var ipConfig *vm.VirtualMachineInitializationIpConfigArray
+	// Build resource options with dependencies
+	opts := []pulumi.ResourceOption{
+		pulumi.Provider(provider),
+		pulumi.DeleteBeforeReplace(true),
+	}
+
+	// Add dependencies if provided
+	if len(dependsOn) > 0 {
+		opts = append(opts, pulumi.DependsOn(dependsOn))
+	}
+
 	vmInstance, err := vm.NewVirtualMachine(ctx, vmDef.Name+fmt.Sprintf("-%d", vmIndex), &vm.VirtualMachineArgs{
 		Name:     pulumi.String(vmName),
 		NodeName: pulumi.String(nodeName),
+		Agent: &vm.VirtualMachineAgentArgs{
+			Enabled: pulumi.Bool(false), // Disable to prevent ide3 cdrom from being added
+		},
 		Memory: &vm.VirtualMachineMemoryArgs{
 			Dedicated: pulumi.Int(vmDef.Memory),
 		},
@@ -213,8 +249,7 @@ func createIPXEVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int
 		},
 		Started: pulumi.Bool(true),
 		OnBoot:  pulumi.Bool(false),
-	}, pulumi.Provider(provider),
-		pulumi.DeleteBeforeReplace(true))
+	}, opts...)
 	if err != nil {
 		return nil, err
 	}

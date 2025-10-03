@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/muhlba91/pulumi-proxmoxve/sdk/v7/go/proxmoxve"
 	"github.com/muhlba91/pulumi-proxmoxve/sdk/v7/go/proxmoxve/vm"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
@@ -72,4 +73,20 @@ type VMGroup struct {
 	VMs []*vm.VirtualMachine
 	IPs []string
 }
+
+type VMCreationConfig struct {
+	BatchSize  int `yaml:"batchSize"`  // How many VMs to create in parallel (default: 3)
+	MaxRetries int `yaml:"maxRetries"` // How many times to retry failed clones (default: 5)
+	BatchDelay int `yaml:"batchDelay"` // Seconds to wait between batches (default: 10)
+}
+
+type VMRequest struct {
+	VMDef       VM
+	Index       int64
+	Provider    *proxmoxve.Provider
+	NodeName    string
+	Gateway     string
+	Password    string
+}
+
 type ServiceHandler func(ctx *pulumi.Context, serviceCtx ServiceContext) error
