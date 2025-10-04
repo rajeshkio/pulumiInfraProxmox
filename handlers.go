@@ -37,7 +37,7 @@ func handleHAProxyService(ctx *pulumi.Context, serviceCtx ServiceContext) error 
 	for i, lbVM := range serviceCtx.VMs {
 		lbIP := serviceCtx.IPs[i]
 		ctx.Log.Info(fmt.Sprintf("Installing HAProxy on %s with backends: %v", lbIP, backendIPs), nil)
-		cmd, err := installHaProxy(ctx, lbIP, lbVM, backendIPs, serviceCtx.VMPassword)
+		cmd, err := installHaProxy(ctx, lbIP, lbVM, backendIPs, serviceCtx.VMPassword, backendDiscovery)
 		if err != nil {
 			return fmt.Errorf("HAProxy installation failed on %s: %w", lbIP, err)
 		}
@@ -120,14 +120,40 @@ func handleK3sService(ctx *pulumi.Context, serviceCtx ServiceContext) error {
 // 	return nil
 // }
 
-func installHaProxy(ctx *pulumi.Context, lbIP string, vmDependency pulumi.Resource, backendIPs []string, vmPassword string) (*remote.Command, error) {
+func installHaProxy(ctx *pulumi.Context, lbIP string, vmDependency pulumi.Resource, backendIPs []string, vmPassword string, backendDiscovery string) (*remote.Command, error) {
 
 	ctx.Log.Info("Print from installHaProxy", nil)
 	var backendServers strings.Builder
+	serviceName := "k3s"
+	if strings.Contains(backendDiscovery, "rke2") {
+		serviceName = "rke2"
+	}
 	for i, serverIP := range backendIPs {
-		backendServers.WriteString(fmt.Sprintf("    server k3s-server-%d %s:6443 check\n", i+1, serverIP))
+		backendServers.WriteString(fmt.Sprintf("    server %s-server-%d %s:6443 check\n", serviceName, i+1, serverIP))
 	}
 
+	// RKE2 needs 9345 port to join the nodes
+	var rke2SupervisorServers strings.Builder
+	if serviceName == "rke2" {
+		for i, serverIP := range backendIPs {
+			rke2SupervisorServers.WriteString(fmt.Sprintf("    server %s-server-%d %s:9345 check\n", serviceName, i+1, serverIP))
+		}
+	}
+
+	rke2Section := ""
+	if serviceName == "rke2" {
+		rke2Section = fmt.Sprintf(`
+# RKE2 Supervisor API (port 9345) - Required for server join operations
+frontend rke2-supervisor
+    bind *:9345
+    mode tcp
+    default_backend rke2-supervisor-servers
+
+backend rke2-supervisor-servers
+    mode tcp
+    balance roundrobin
+%s`, rke2SupervisorServers.String())
+	}
 	haProxyConfig := fmt.Sprintf(`
 global
     daemon
@@ -143,16 +169,16 @@ defaults
     log global
 
 # K3s API Server Load Balancer
-frontend k3s-api
+frontend k8s-api
     bind *:6443
     mode tcp
-    default_backend k3s-servers
+    default_backend k8s-servers
 
-backend k3s-servers
+backend k8s-servers
     mode tcp
     balance roundrobin
 %s
-	`, backendServers.String())
+	%s`, backendServers.String(), rke2Section)
 
 	installCmd := fmt.Sprintf(`
 		# Update package list
@@ -241,10 +267,12 @@ EOF
 	}
 	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
 		Connection: &remote.ConnectionArgs{
-			Host:       pulumi.String(serverIP),
-			User:       pulumi.String("rajeshk"),
-			PrivateKey: pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
-			Password:   pulumi.String(vmPassword),
+			Host:           pulumi.String(serverIP),
+			User:           pulumi.String("rajeshk"),
+			PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+			Password:       pulumi.String(vmPassword),
+			PerDialTimeout: pulumi.IntPtr(30),
+			DialErrorLimit: pulumi.IntPtr(20),
 		},
 		Create: k3sCommand,
 	}, pulumi.DependsOn(dependencies))
@@ -255,10 +283,12 @@ func getK3sToken(ctx *pulumi.Context, firstServerIP, vmPassword string, vmDepend
 	resourceName := fmt.Sprintf("k3s-token-%s", strings.ReplaceAll(firstServerIP, ".", "-"))
 	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
 		Connection: &remote.ConnectionArgs{
-			Host:       pulumi.String(firstServerIP),
-			User:       pulumi.String("rajeshk"),
-			PrivateKey: pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
-			Password:   pulumi.String(vmPassword),
+			Host:           pulumi.String(firstServerIP),
+			User:           pulumi.String("rajeshk"),
+			PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+			Password:       pulumi.String(vmPassword),
+			PerDialTimeout: pulumi.IntPtr(30),
+			DialErrorLimit: pulumi.IntPtr(20),
 		},
 		Create: pulumi.String(`
 			# Wait for K3s to be fully ready and token file to exist
@@ -290,10 +320,12 @@ func getK3sKubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, vm
 
 	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
 		Connection: &remote.ConnectionArgs{
-			Host:       pulumi.String(serverIP),
-			User:       pulumi.String("rajeshk"),
-			PrivateKey: pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
-			Password:   pulumi.String(vmPassword),
+			Host:           pulumi.String(serverIP),
+			User:           pulumi.String("rajeshk"),
+			PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+			Password:       pulumi.String(vmPassword),
+			PerDialTimeout: pulumi.IntPtr(30),
+			DialErrorLimit: pulumi.IntPtr(20),
 		},
 		Create: pulumi.String(kubeconfigCommand),
 	}, pulumi.DependsOn([]pulumi.Resource{vmDependency}))
@@ -453,10 +485,12 @@ EOF
 
 	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
 		Connection: &remote.ConnectionArgs{
-			Host:       pulumi.String(serverIP),
-			User:       pulumi.String("rajeshk"),
-			PrivateKey: pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
-			Password:   pulumi.String(vmPassword),
+			Host:           pulumi.String(serverIP),
+			User:           pulumi.String("rajeshk"),
+			PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+			Password:       pulumi.String(vmPassword),
+			PerDialTimeout: pulumi.IntPtr(30),
+			DialErrorLimit: pulumi.IntPtr(20),
 		},
 		Create: rke2Command,
 	}, pulumi.DependsOn(dependencies))
@@ -467,10 +501,12 @@ func getRKE2Token(ctx *pulumi.Context, firstServerIP, vmPassword string, vmDepen
 	resourceName := fmt.Sprintf("rke2-token-%s", strings.ReplaceAll(firstServerIP, ".", "-"))
 	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
 		Connection: &remote.ConnectionArgs{
-			Host:       pulumi.String(firstServerIP),
-			User:       pulumi.String("rajeshk"),
-			PrivateKey: pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
-			Password:   pulumi.String(vmPassword),
+			Host:           pulumi.String(firstServerIP),
+			User:           pulumi.String("rajeshk"),
+			PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+			Password:       pulumi.String(vmPassword),
+			PerDialTimeout: pulumi.IntPtr(30),
+			DialErrorLimit: pulumi.IntPtr(20),
 		},
 		Create: pulumi.String(`
 			# Wait for RKE2 to be fully ready and token file to exist
@@ -501,10 +537,12 @@ func getRKE2Kubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, v
 
 	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
 		Connection: &remote.ConnectionArgs{
-			Host:       pulumi.String(serverIP),
-			User:       pulumi.String("rajeshk"),
-			PrivateKey: pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
-			Password:   pulumi.String(vmPassword),
+			Host:           pulumi.String(serverIP),
+			User:           pulumi.String("rajeshk"),
+			PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+			Password:       pulumi.String(vmPassword),
+			PerDialTimeout: pulumi.IntPtr(30),
+			DialErrorLimit: pulumi.IntPtr(20),
 		},
 		Create: pulumi.String(kubeconfigCommand),
 	}, pulumi.DependsOn([]pulumi.Resource{vmDependency}))
@@ -761,9 +799,11 @@ systemctl enable kubelet
 	}).(pulumi.StringOutput)
 
 	connection := &remote.ConnectionArgs{
-		Host:       pulumi.String(ip),
-		User:       pulumi.String("rajeshk"),
-		PrivateKey: pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+		Host:           pulumi.String(ip),
+		User:           pulumi.String("rajeshk"),
+		PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+		PerDialTimeout: pulumi.IntPtr(30),
+		DialErrorLimit: pulumi.IntPtr(20),
 	}
 
 	_, err := remote.NewCommand(ctx, fmt.Sprintf("kubeadm-join-cp-%s", ip), &remote.CommandArgs{
@@ -824,9 +864,11 @@ systemctl enable kubelet
 	}).(pulumi.StringOutput)
 
 	connection := &remote.ConnectionArgs{
-		Host:       pulumi.String(ip),
-		User:       pulumi.String("rajeshk"),
-		PrivateKey: pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+		Host:           pulumi.String(ip),
+		User:           pulumi.String("rajeshk"),
+		PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+		PerDialTimeout: pulumi.IntPtr(30),
+		DialErrorLimit: pulumi.IntPtr(20),
 	}
 
 	_, err := remote.NewCommand(ctx, fmt.Sprintf("kubeadm-join-worker-%s", ip), &remote.CommandArgs{

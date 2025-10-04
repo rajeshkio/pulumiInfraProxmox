@@ -246,7 +246,7 @@ func createIPXEVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int
 		Started:    pulumi.Bool(true),
 		OnBoot:     pulumi.Bool(false),
 		Protection: pulumi.Bool(true),
-	}, opts...)
+	}, append(opts, pulumi.Protect(true))...)
 	if err != nil {
 		return nil, err
 	}
