@@ -35,18 +35,18 @@ config:
       bootMethod: cloud-init
     # RKE2 control plane nodes
     - name: "rke2-servers"
-      count: 0
+      count: 3
       templateId: 9001 # SLE Micro template
-      cpu: 4
-      memory: 4000
-      diskSize: 32
+      cpu: 5
+      memory: 15000
+      diskSize: 250
       ips: ["192.168.90.200", "192.168.90.201", "192.168.90.202"]
       username: rajeshk
       authMethod: ssh-key
       proxmoxNode: proxmox-2
       bootMethod: cloud-init
     - name: "kubeadm-servers"
-      count: 3
+      count: 0
       templateId: 9000 # Ubuntu template
       cpu: 4
       memory: 4000
@@ -68,6 +68,17 @@ config:
       authMethod: ssh-key
       proxmoxNode: proxmox-2
       bootMethod: cloud-init
+    - name: "harvester-nodes"
+      count: 1
+      bootMethod: "ipxe"
+      ipxeConfig:
+        isoFileName: "harvester-ipxe-https.iso"
+      memory: 40000
+      cpu: 12
+      diskSize: 600
+      proxmoxNode: "proxmox-2"
+      ips: ["192.168.90.191"]
+      ipconfig: "static"
   # ========================================
   # SERVICES LAYER - What runs on those VMs
   # ========================================
@@ -77,7 +88,7 @@ config:
     haproxy:
       enabled: true
       targets: ["load-balancer"]
-      backendDiscovery: "kubeadm-servers" # or "rke2-servers" depending on what you're deploying
+      backendDiscovery: "rke2-servers" # or "rke2-servers" depending on what you're deploying
       config:
         frontend-port: 6443
         backend-port: 6443
@@ -91,7 +102,7 @@ config:
         tls-san-loadbalancer: true
     # RKE2 Kubernetes Distribution (alternative to K3s)
     rke2:
-      enabled: false # Set to true to deploy RKE2 instead
+      enabled: true # Set to true to deploy RKE2 instead
       controlPlane: ["rke2-servers"]
       workers: []
       config:
@@ -105,7 +116,3 @@ config:
     talos:
       enabled: false
       targets: ["kubeadm-servers", "workers"]
-    # Harvester HCI (not yet implemented)
-    harvester:
-      enabled: true
-      targets: ["harvester-nodes"]

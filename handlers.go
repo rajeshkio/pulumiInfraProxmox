@@ -474,7 +474,7 @@ func getRKE2Token(ctx *pulumi.Context, firstServerIP, vmPassword string, vmDepen
 		},
 		Create: pulumi.String(`
 			# Wait for RKE2 to be fully ready and token file to exist
-			while [ ! -f /var/lib/rancher/rke2/server/node-token ]; do
+			while ! sudo test -f /var/lib/rancher/rke2/server/node-token; do
 				echo "Waiting for RKE2 token file..."
 				sleep 5
 			done
@@ -850,11 +850,11 @@ func getConfigString(config map[string]interface{}, key string, defaultValue str
 func handleHarvesterService(ctx *pulumi.Context, serviceCtx ServiceContext) error {
 	// Harvester is special - VMs boot from iPXE and configure themselves
 	// This handler just logs information about Harvester deployment
-	
+
 	targets := serviceCtx.ServiceConfig.Targets
 	config := serviceCtx.ServiceConfig.Config
 	version := getConfigString(config, "version", "v1.4.1")
-	bootServerURL := getConfigString(config, "boot-server-url", "http://192.168.90.1:8080")
+	bootServerURL := getConfigString(config, "boot-server-url", "http://192.168.90.103:8080")
 
 	// Check if there are any Harvester VMs configured
 	var harvesterVMCount int
@@ -874,12 +874,12 @@ func handleHarvesterService(ctx *pulumi.Context, serviceCtx ServiceContext) erro
 	scriptName := fmt.Sprintf("harvester-%s.ipxe", version)
 	scriptURL := fmt.Sprintf("%s/%s", bootServerURL, scriptName)
 
-	ctx.Log.Info(fmt.Sprintf("Harvester Deployment Information:"), nil)
+	ctx.Log.Info("Harvester Deployment Information:", nil)
 	ctx.Log.Info(fmt.Sprintf("  - Version: %s", version), nil)
 	ctx.Log.Info(fmt.Sprintf("  - Boot Script: %s", scriptURL), nil)
 	ctx.Log.Info(fmt.Sprintf("  - Nodes: %d VMs configured", harvesterVMCount), nil)
-	ctx.Log.Info(fmt.Sprintf("  - VMs will boot from iPXE and auto-configure Harvester cluster"), nil)
-	ctx.Log.Info(fmt.Sprintf("  - Access UI at: https://<first-vm-ip>:8443 after boot completes"), nil)
-	
+	ctx.Log.Info("VMs will boot from iPXE and auto-configure Harvester cluster", nil)
+	ctx.Log.Info("  - Access UI at: https://<first-vm-ip>:8443 after boot completes", nil)
+
 	return nil
 }

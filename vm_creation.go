@@ -119,9 +119,6 @@ func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 		pulumi.Provider(provider),
 		pulumi.DeleteBeforeReplace(true),
 		pulumi.IgnoreChanges([]string{"clone"}),
-		pulumi.Timeouts(&pulumi.CustomTimeouts{
-			Create: "15m",
-		}),
 	}
 
 	// Add dependencies if provided
@@ -140,7 +137,7 @@ func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 			Type:  pulumi.String("x86-64-v2-AES"),
 		},
 		Clone: &vm.VirtualMachineCloneArgs{
-			NodeName: pulumi.String(nodeName),
+			NodeName: pulumi.String("proxmox-2"), // hardcoding this for now as I have all the templates on proxmox-2. TODO somehow automate this as well.
 			VmId:     pulumi.Int(vmDef.TemplateID),
 			Full:     pulumi.Bool(true),
 			Retries:  pulumi.Int(3), // Retry clone operation up to 3 times
@@ -227,12 +224,11 @@ func createIPXEVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int
 		},
 		Disks: &vm.VirtualMachineDiskArray{
 			&vm.VirtualMachineDiskArgs{
-				Interface: pulumi.String("scsi0"),
-				//	DatastoreId: pulumi.String("nfs-iso"),
-				//	FileId:     pulumi.String("nfs-iso:iso/harvester-boot.iso"),
-				Size:       pulumi.Int(vmDef.DiskSize), // Match your template's disk size
-				FileFormat: pulumi.String("raw"),
-				Iothread:   pulumi.Bool(true),
+				Interface:   pulumi.String("scsi0"),
+				DatastoreId: pulumi.String("local-lvm"), // Create new disk (no cloning for iPXE)
+				Size:        pulumi.Int(vmDef.DiskSize),
+				FileFormat:  pulumi.String("raw"),
+				Iothread:    pulumi.Bool(true),
 			},
 		},
 		Cdrom: &vm.VirtualMachineCdromArgs{
@@ -247,8 +243,9 @@ func createIPXEVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int
 				Firewall: pulumi.Bool(true),
 			},
 		},
-		Started: pulumi.Bool(true),
-		OnBoot:  pulumi.Bool(false),
+		Started:    pulumi.Bool(true),
+		OnBoot:     pulumi.Bool(false),
+		Protection: pulumi.Bool(true),
 	}, opts...)
 	if err != nil {
 		return nil, err

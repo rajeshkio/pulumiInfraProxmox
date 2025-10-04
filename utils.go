@@ -72,8 +72,9 @@ func loadConfig(ctx *pulumi.Context) (string, string, []VM, *Services, *VMCreati
 	}
 
 	for i := range vms {
-		if vms[i].TemplateID == 0 {
-			return "", "", nil, nil, nil, fmt.Errorf("VM '%s' has no templateId set. Template ID is required and must be between 100-2147483647", vms[i].Name)
+		// iPXE boot VMs (like Harvester) don't need a template - they boot from ISO
+		if vms[i].BootMethod != "ipxe" && vms[i].TemplateID == 0 {
+			return "", "", nil, nil, nil, fmt.Errorf("VM '%s' has no templateId set. Template ID is required for bootMethod '%s'", vms[i].Name, vms[i].BootMethod)
 		}
 		if vms[i].Name == "" {
 			return "", "", nil, nil, nil, fmt.Errorf("VM at index %d has no name set", i)
