@@ -359,12 +359,38 @@ func handleRKE2Service(ctx *pulumi.Context, serviceCtx ServiceContext) error {
 	}
 	lbIP := lbIPs[0]
 
+	// ========================================
+	// PHASE 1: Install Server (Control Plane)
+	// ========================================
+	controlPlaneNodes := serviceCtx.ServiceConfig.ControlPlane
+	if len(controlPlaneNodes) == 0 {
+		return fmt.Errorf("rke2 service requires control-plane nodes configured")
+	}
+
+	// Get server VMs and IPs
+	var serverVMs []*vm.VirtualMachine
+	var serverIPs []string
+	for _, nodeName := range controlPlaneNodes {
+		vms, ok := serviceCtx.GlobalDeps[nodeName+"-vms"]
+		if !ok {
+			continue
+		}
+		ips, ok := serviceCtx.GlobalDeps[nodeName+"-ips"].([]string)
+		if !ok {
+			continue
+		}
+		serverVMs = append(serverVMs, vms.([]*vm.VirtualMachine)...)
+		serverIPs = append(serverIPs, ips...)
+	}
+
 	ctx.Log.Info(fmt.Sprintf("installing rke2 server with LBIP: %s", lbIP), nil)
 	var rke2ServerToken pulumi.StringOutput
 	var firstServerIP string
+	var lastServerCommand pulumi.Resource
 
-	for i, serverVM := range serviceCtx.VMs {
-		serverIP := serviceCtx.IPs[i]
+	// Install servers sequentially
+	for i, serverVM := range serverVMs {
+		serverIP := serverIPs[i]
 		isFirstServer := (i == 0)
 
 		ctx.Log.Info(fmt.Sprintf("Installing RKE2 on server %d: %s", i+1, serverIP), nil)
@@ -377,26 +403,78 @@ func handleRKE2Service(ctx *pulumi.Context, serviceCtx ServiceContext) error {
 			if err != nil {
 				return fmt.Errorf("cannot install RKE2 server on first node %s: %w", serverIP, err)
 			}
+			lastServerCommand = rke2Cmd
+
 			tokenCmd, err := getRKE2Token(ctx, serverIP, serviceCtx.VMPassword, rke2Cmd)
 			if err != nil {
 				return fmt.Errorf("cannot get rke2 token: %w", err)
 			}
 			rke2ServerToken = tokenCmd.Stdout
 		} else {
-			_, err := installRKE2Server(ctx, lbIP, serviceCtx.VMPassword, serverIP, serverVM, false, rke2ServerToken, nil)
+			rke2Cmd, err := installRKE2Server(ctx, lbIP, serviceCtx.VMPassword, serverIP, serverVM, false, rke2ServerToken, nil)
 			if err != nil {
 				return fmt.Errorf("cannot install rke2 on server %s: %w", serverIP, serverVM)
 			}
+			lastServerCommand = rke2Cmd
 		}
 	}
+
+	// Export kubeconfig from first server
 	if firstServerIP != "" {
-		err := getRKE2Kubeconfig(ctx, firstServerIP, serviceCtx.VMPassword, lbIP, serviceCtx.VMs[0])
+		err := getRKE2Kubeconfig(ctx, firstServerIP, serviceCtx.VMPassword, lbIP, serverVMs[0])
 		if err != nil {
 			return fmt.Errorf("failed to extract rke2 kubeconfig: %w", err)
 		}
 	}
 
-	ctx.Log.Info(fmt.Sprintf("RKE2 service installed on %d servers", len(serviceCtx.VMs)), nil)
+	ctx.Log.Info(fmt.Sprintf("RKE2 service installed on %d servers", len(serverVMs)), nil)
+
+	// ========================================
+	// PHASE 2: Install Workers (Agents)
+	// ========================================
+	workerNodes := serviceCtx.ServiceConfig.Workers
+	if len(workerNodes) == 0 {
+		ctx.Log.Info("No worker nodes configured for RKE2", nil)
+		return nil
+	}
+
+	// Get worker VMs and IPs
+	var workerVMs []*vm.VirtualMachine
+	var workerIPs []string
+	for _, nodeName := range workerNodes {
+		vms, ok := serviceCtx.GlobalDeps[nodeName+"-vms"]
+		if !ok {
+			ctx.Log.Warn(fmt.Sprintf("Worker VMs for '%s' not found", nodeName), nil)
+			continue
+		}
+		ips, ok := serviceCtx.GlobalDeps[nodeName+"-ips"].([]string)
+		if !ok {
+			ctx.Log.Warn(fmt.Sprintf("Worker IPs for '%s' not found", nodeName), nil)
+			continue
+		}
+		workerVMs = append(workerVMs, vms.([]*vm.VirtualMachine)...)
+		workerIPs = append(workerIPs, ips...)
+	}
+
+	if len(workerVMs) == 0 {
+		ctx.Log.Info("No worker VMs found to join", nil)
+		return nil
+	}
+
+	ctx.Log.Info(fmt.Sprintf("Installing RKE2 agent on %d worker nodes", len(workerVMs)), nil)
+
+	// Install workers - they join the cluster as agents
+	for i, workerVM := range workerVMs {
+		workerIP := workerIPs[i]
+		ctx.Log.Info(fmt.Sprintf("Installing RKE2 agent on worker %d: %s", i+1, workerIP), nil)
+
+		_, err := installRKE2Worker(ctx, lbIP, serviceCtx.VMPassword, workerIP, workerVM, lastServerCommand, rke2ServerToken)
+		if err != nil {
+			return fmt.Errorf("failed to install RKE2 agent on worker %s: %w", workerIP, err)
+		}
+	}
+
+	ctx.Log.Info(fmt.Sprintf("RKE2 agents installed on %d workers", len(workerVMs)), nil)
 	return nil
 }
 
@@ -640,7 +718,107 @@ func handleKubeadmService(ctx *pulumi.Context, serviceCtx ServiceContext) error 
 	ctx.Log.Info("Kubeadm cluster installed successfully", nil)
 	return nil
 }
+func installRKE2Worker(ctx *pulumi.Context, lbIP, vmPassword, workerIP string, vmDependency pulumi.Resource, serverDependency pulumi.Resource, rke2Token pulumi.StringOutput) (*remote.Command, error) {
 
+	rke2Command := pulumi.Sprintf(`
+		# Set DNS resolver
+		sudo tee /etc/resolv.conf << 'EOF'
+nameserver 192.168.90.1
+EOF
+
+		# Wait for server to be ready
+		until curl -k -s https://%s:9345/ping; do
+			echo "Waiting for RKE2 server to be ready..."
+			sleep 10
+		done
+
+		# Create RKE2 config directory
+		sudo mkdir -p /etc/rancher/rke2
+
+		# Create RKE2 agent configuration
+		sudo tee /etc/rancher/rke2/config.yaml << 'EOF'
+server: https://%s:9345
+token: %s
+EOF
+
+		# Download and install RKE2
+		curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE="agent" sudo sh -
+
+		# Enable and start RKE2 agent
+		sudo systemctl enable rke2-agent.service
+		sudo systemctl start rke2-agent.service
+
+		echo "RKE2 agent joined cluster successfully"
+	`, lbIP, lbIP, rke2Token)
+
+	resourceName := fmt.Sprintf("rke2-worker-%s", strings.ReplaceAll(workerIP, ".", "-"))
+	dependencies := []pulumi.Resource{vmDependency}
+	if serverDependency != nil {
+		dependencies = append(dependencies, serverDependency)
+		ctx.Log.Info(fmt.Sprintf("RKE2 worker %s will wait for RKE2 Server installation", workerIP), nil)
+	}
+
+	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
+		Connection: &remote.ConnectionArgs{
+			Host:           pulumi.String(workerIP),
+			User:           pulumi.String("rajeshk"),
+			PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+			Password:       pulumi.String(vmPassword),
+			PerDialTimeout: pulumi.IntPtr(30),
+			DialErrorLimit: pulumi.IntPtr(20),
+		},
+		Create: rke2Command,
+	}, pulumi.DependsOn(dependencies))
+
+	return cmd, err
+}
+
+// ========================================
+// K3S Worker Installation Function
+// ========================================
+
+// installK3SWorker installs K3s agent on worker nodes
+func installK3SWorker(ctx *pulumi.Context, lbIP, vmPassword, workerIP string, vmDependency pulumi.Resource, serverDependency pulumi.Resource, k3sToken pulumi.StringOutput) (*remote.Command, error) {
+
+	k3sCommand := pulumi.Sprintf(`
+		# Set DNS resolver
+		sudo tee /etc/resolv.conf << 'EOF'
+nameserver 192.168.90.1
+EOF
+
+		# Wait for server to be ready
+		until curl -k -s https://%s:6443/ping; do
+			echo "Waiting for K3s server to be ready..."
+			sleep 10
+		done
+
+		# Install K3s agent
+		curl -sfL https://get.k3s.io | K3S_URL=https://%s:6443 K3S_TOKEN=%s sudo sh -
+
+		echo "K3s agent joined cluster successfully"
+	`, lbIP, lbIP, k3sToken)
+
+	resourceName := fmt.Sprintf("k3s-worker-%s", strings.ReplaceAll(workerIP, ".", "-"))
+	dependencies := []pulumi.Resource{vmDependency}
+	if serverDependency != nil {
+		dependencies = append(dependencies, serverDependency)
+		ctx.Log.Info(fmt.Sprintf("K3s worker %s will wait for K3s Server installation", workerIP), nil)
+	}
+
+	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
+		Connection: &remote.ConnectionArgs{
+			Host:           pulumi.String(workerIP),
+			User:           pulumi.String("rajeshk"),
+			PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+			Password:       pulumi.String(vmPassword),
+			PerDialTimeout: pulumi.IntPtr(30),
+			DialErrorLimit: pulumi.IntPtr(20),
+		},
+		Create: k3sCommand,
+	}, pulumi.DependsOn(dependencies))
+
+	return cmd, err
+}
 func initKubeadmControlPlane(ctx *pulumi.Context, ip string, vmResource *vm.VirtualMachine, serviceCtx ServiceContext) (pulumi.StringOutput, error) {
 	ctx.Log.Info(fmt.Sprintf("Hello From initKubeadmControlPlane on ip %s", ip), nil)
 	// Get configuration

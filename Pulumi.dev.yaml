@@ -11,7 +11,7 @@ config:
   proxmox-k3s-cluster:vms:
     # Load balancer for Kubernetes API
     - name: "load-balancer"
-      count: 1 
+      count: 1
       templateId: 9000 # Ubuntu template
       cpu: 2
       memory: 2000
@@ -58,11 +58,11 @@ config:
       bootMethod: cloud-init
     # Worker nodes (can be shared or dedicated)
     - name: "workers"
-      count: 0
+      count: 2
       templateId: 9000 # Ubuntu template
       cpu: 4
       memory: 8000
-      diskSize: 100
+      diskSize: 50
       ips: ["192.168.90.210", "192.168.90.211"]
       username: rajeshk
       authMethod: ssh-key
@@ -72,7 +72,7 @@ config:
       count: 1
       bootMethod: "ipxe"
       ipxeConfig:
-        isoFileName: "harvester-boot-v1.4.3.iso" 
+        isoFileName: "harvester-boot-v1.4.3.iso"
       memory: 40000
       cpu: 12
       diskSize: 600
@@ -86,7 +86,7 @@ config:
   proxmox-k3s-cluster:services:
     # Load balancer service
     haproxy:
-      enabled: true 
+      enabled: true
       targets: ["load-balancer"]
       backendDiscovery: "rke2-servers" # or "rke2-servers" depending on what you're deploying
       config:
@@ -104,7 +104,7 @@ config:
     rke2:
       enabled: true # Set to true to deploy RKE2 instead
       controlPlane: ["rke2-servers"]
-      workers: []
+      workers: ["workers"]
       config:
         cluster-init: true
     # Kubeadm (not yet implemented)

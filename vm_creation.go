@@ -118,7 +118,7 @@ func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 	opts := []pulumi.ResourceOption{
 		pulumi.Provider(provider),
 		pulumi.DeleteBeforeReplace(true),
-		pulumi.IgnoreChanges([]string{"clone"}),
+		pulumi.IgnoreChanges([]string{"clone", "disks"}),
 	}
 
 	// Add dependencies if provided
@@ -147,7 +147,7 @@ func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 		},
 		Disks: &vm.VirtualMachineDiskArray{
 			&vm.VirtualMachineDiskArgs{
-				Interface: pulumi.String("scsi0"),
+				Interface:  pulumi.String("scsi0"),
 				Size:       pulumi.Int(vmDef.DiskSize), // Match your template's disk size
 				FileFormat: pulumi.String("raw"),
 			},
@@ -241,9 +241,9 @@ func createIPXEVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int
 				Firewall: pulumi.Bool(true),
 			},
 		},
-		Started:    pulumi.Bool(true),
-		OnBoot:     pulumi.Bool(false),
-	//	Protection: pulumi.Bool(true), Commenting this line for testing. will remove later TODO.
+		Started: pulumi.Bool(true),
+		OnBoot:  pulumi.Bool(false),
+		//	Protection: pulumi.Bool(true), Commenting this line for testing. will remove later TODO.
 	}, append(opts, pulumi.Protect(true))...)
 	if err != nil {
 		return nil, err
