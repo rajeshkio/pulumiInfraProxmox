@@ -137,7 +137,7 @@ func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 			Type:  pulumi.String("x86-64-v2-AES"),
 		},
 		Clone: &vm.VirtualMachineCloneArgs{
-			NodeName: pulumi.String("proxmox-2"), // hardcoding this for now as I have all the templates on proxmox-2. TODO somehow automate this as well.
+			NodeName: pulumi.String("proxmox-1"), // hardcoding this for now as I have all the templates on proxmox-1. TODO somehow automate this as well.
 			VmId:     pulumi.Int(vmDef.TemplateID),
 			Full:     pulumi.Bool(true),
 			Retries:  pulumi.Int(3), // Retry clone operation up to 3 times
@@ -148,7 +148,6 @@ func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 		Disks: &vm.VirtualMachineDiskArray{
 			&vm.VirtualMachineDiskArgs{
 				Interface: pulumi.String("scsi0"),
-				//	DatastoreId: pulumi.String("nfs-iso"),
 				Size:       pulumi.Int(vmDef.DiskSize), // Match your template's disk size
 				FileFormat: pulumi.String("raw"),
 			},
@@ -161,8 +160,7 @@ func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 			},
 		},
 		Initialization: &vm.VirtualMachineInitializationArgs{
-			DatastoreId: pulumi.String("nfs-iso"),
-			//	UserDataFileId: pulumi.String("nfs-iso:snippets/test-basic.yaml"),
+			DatastoreId: pulumi.String("nas-storage"),
 			UserAccount: userAccount,
 			Dns: &vm.VirtualMachineInitializationDnsArgs{
 				Domain: pulumi.String("local"),
@@ -215,7 +213,7 @@ func createIPXEVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int
 		},
 		Cpu: &vm.VirtualMachineCpuArgs{
 			Cores: pulumi.Int(vmDef.CPU),
-			Type:  pulumi.String("x86-64-v2-AES"),
+			Type:  pulumi.String("host"), // needed host type to ensure kvm is available on harvester for vms
 		},
 		BootOrders: pulumi.StringArray{
 			pulumi.String("scsi0"), // Disk first
@@ -233,7 +231,7 @@ func createIPXEVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int
 		},
 		Cdrom: &vm.VirtualMachineCdromArgs{
 			//	Enabled:   pulumi.Bool(true),
-			FileId:    pulumi.String(fmt.Sprintf("nfs-iso:iso/%s", isoFileName)),
+			FileId:    pulumi.String(fmt.Sprintf("nas-storage:iso/%s", isoFileName)),
 			Interface: pulumi.String("ide2"),
 		},
 		NetworkDevices: &vm.VirtualMachineNetworkDeviceArray{
@@ -245,7 +243,7 @@ func createIPXEVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int
 		},
 		Started:    pulumi.Bool(true),
 		OnBoot:     pulumi.Bool(false),
-		Protection: pulumi.Bool(true),
+	//	Protection: pulumi.Bool(true), Commenting this line for testing. will remove later TODO.
 	}, append(opts, pulumi.Protect(true))...)
 	if err != nil {
 		return nil, err

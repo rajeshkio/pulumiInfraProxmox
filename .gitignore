@@ -5,3 +5,5 @@ rajesh-tls-cert-5-july.key
 kubeconfig.yaml
 proxmox-token.txt
 Pulumi.dev.yaml
+*-kubeconfig.yaml
+rke2-kubeconfig.yaml

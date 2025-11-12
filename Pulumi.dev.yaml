@@ -11,7 +11,7 @@ config:
   proxmox-k3s-cluster:vms:
     # Load balancer for Kubernetes API
     - name: "load-balancer"
-      count: 1
+      count: 1 
       templateId: 9000 # Ubuntu template
       cpu: 2
       memory: 2000
@@ -72,11 +72,11 @@ config:
       count: 1
       bootMethod: "ipxe"
       ipxeConfig:
-        isoFileName: "harvester-ipxe-https.iso"
+        isoFileName: "harvester-boot-v1.4.3.iso" 
       memory: 40000
       cpu: 12
       diskSize: 600
-      proxmoxNode: "proxmox-2"
+      proxmoxNode: "proxmox-1"
       ips: ["192.168.90.191"]
       ipconfig: "static"
   # ========================================
@@ -86,7 +86,7 @@ config:
   proxmox-k3s-cluster:services:
     # Load balancer service
     haproxy:
-      enabled: true
+      enabled: true 
       targets: ["load-balancer"]
       backendDiscovery: "rke2-servers" # or "rke2-servers" depending on what you're deploying
       config:
