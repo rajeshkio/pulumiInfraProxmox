@@ -24,7 +24,7 @@ type IPXEConfig struct {
 	ConfigUrl     string   `yaml:"configUrl,omitempty"`
 	KernelParams  []string `yaml:"kernelParams,omitempty"`
 	AutoInstall   bool     `yaml:"autoInstall,omitempty"`
-	ISOFileName   string   `yaml:"isoFileName,omitempty"`
+	ISOFiles      []string `yaml:"isoFiles,omitempty"`
 
 	KernelURL string `yaml:"kernelUrl,omitempty"`
 	InitrdURL string `yaml:"initrdUrl,omitempty"`
@@ -38,8 +38,8 @@ type VM struct {
 	Memory      int64       `yaml:"memory"`
 	CPU         int64       `yaml:"cpu"`
 	DiskSize    int64       `yaml:"diskSize"`
-	IPs         []string    `yaml:"ips"`
-	IPConfig    string      `yaml:"ipconfig"`
+	IPs         []string    `yaml:"ips,omitempty"`
+	IPConfig    string      `yaml:"ipconfig,omitempty"`
 	Gateway     string      `yaml:"gateway,omitempty"`
 	Username    string      `yaml:"username,omitempty"`
 	AuthMethod  string      `yaml:"authMethod,omitempty"`
@@ -81,12 +81,25 @@ type VMCreationConfig struct {
 }
 
 type VMRequest struct {
-	VMDef       VM
-	Index       int64
-	Provider    *proxmoxve.Provider
-	NodeName    string
-	Gateway     string
-	Password    string
+	VMDef    VM
+	Index    int64
+	Provider *proxmoxve.Provider
+	NodeName string
+	Gateway  string
+	Password string
 }
 
+type HAProxyBackend struct {
+	Name         string
+	IPs          []string
+	FrontendPort int
+	BackendPort  int
+}
+
+type HAProxyServiceConfig struct {
+	APIPort        int            `json:"apiPort"`
+	SupervisorPort int            `json:"supervisorPort,omitempty"`
+	DashboardPort  int            `json:"dashboardPort,omitempty"`
+	ExtraPorts     map[string]int `json:"extraPorts,omitempty"`
+}
 type ServiceHandler func(ctx *pulumi.Context, serviceCtx ServiceContext) error

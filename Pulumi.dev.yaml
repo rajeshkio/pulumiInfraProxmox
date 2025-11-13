@@ -15,7 +15,7 @@ config:
       templateId: 9000 # Ubuntu template
       cpu: 2
       memory: 2000
-      diskSize: 32
+      diskSize: 50 # should be same as the disk size mentioned in the template 9000
       ips: ["192.168.90.195"]
       username: rajeshk
       authMethod: ssh-key
@@ -23,78 +23,86 @@ config:
       bootMethod: cloud-init
     # K3s control plane nodes
     - name: "k3s-servers"
-      count: 0
+      count: 3
       templateId: 9001 # SLE Micro template (or Ubuntu)
       cpu: 4
       memory: 4000
-      diskSize: 50
+      diskSize: 50 # should be same as the disk size mentioned in the template 9000
       ips: ["192.168.90.187", "192.168.90.188", "192.168.90.189"]
       username: rajeshk
       authMethod: ssh-key
       proxmoxNode: proxmox-2
       bootMethod: cloud-init
+
     # RKE2 control plane nodes
     - name: "rke2-servers"
       count: 3
       templateId: 9001 # SLE Micro template
       cpu: 5
       memory: 15000
-      diskSize: 250
+      diskSize: 50 # should be same as the disk size mentioned in the template 9001
       ips: ["192.168.90.200", "192.168.90.201", "192.168.90.202"]
       username: rajeshk
       authMethod: ssh-key
       proxmoxNode: proxmox-2
       bootMethod: cloud-init
+
     - name: "kubeadm-servers"
       count: 0
       templateId: 9000 # Ubuntu template
       cpu: 4
       memory: 4000
-      diskSize: 50
+      diskSize: 50 # should be same as the disk size mentioned in the template 9000
       ips: ["192.168.90.211", "192.168.90.212", "192.168.90.213"]
       username: rajeshk
       authMethod: ssh-key
       proxmoxNode: proxmox-2
       bootMethod: cloud-init
+
     # Worker nodes (can be shared or dedicated)
     - name: "workers"
       count: 2
       templateId: 9000 # Ubuntu template
       cpu: 4
       memory: 8000
-      diskSize: 50
+      diskSize: 50 # should be same as the disk size mentioned in the template 9000
       ips: ["192.168.90.210", "192.168.90.211"]
       username: rajeshk
       authMethod: ssh-key
       proxmoxNode: proxmox-2
       bootMethod: cloud-init
     - name: "harvester-nodes"
-      count: 1
+      count: 3
       bootMethod: "ipxe"
       ipxeConfig:
-        isoFileName: "harvester-boot-v1.4.3.iso"
+        isoFiles:
+          - "harvester-create-v1.4.3.iso"
+          - "harvester-join-v1.4.3.iso"
       memory: 40000
       cpu: 12
-      diskSize: 600
-      proxmoxNode: "proxmox-1"
-      ips: ["192.168.90.191"]
-      ipconfig: "static"
+      diskSize: 300
   # ========================================
   # SERVICES LAYER - What runs on those VMs
   # ========================================
   # Enable only what you need - services discover their target VMs
   proxmox-k3s-cluster:services:
     # Load balancer service
-    haproxy:
+    haproxy-config:
       enabled: true
       targets: ["load-balancer"]
-      backendDiscovery: "rke2-servers" # or "rke2-servers" depending on what you're deploying
       config:
-        frontend-port: 6443
-        backend-port: 6443
+        ports:
+          rke2:
+            apiPort: 6443
+            supervisorPort: 9345
+          k3s:
+            apiPort: 6444 # Different from RKE2 to avoid conflict
+          kubeadm:
+            apiPort: 6445
+
     # K3s Kubernetes Distribution
     k3s:
-      enabled: false
+      enabled: true
       controlPlane: ["k3s-servers"]
       workers: [] # Optional: ["workers"] if you want dedicated worker nodes
       config:

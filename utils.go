@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/muhlba91/pulumi-proxmoxve/sdk/v7/go/proxmoxve"
 	"github.com/muhlba91/pulumi-proxmoxve/sdk/v7/go/proxmoxve/vm"
@@ -45,10 +47,30 @@ func setupProxmoxProvider(ctx *pulumi.Context) (*proxmoxve.Provider, error) {
 	return provider, nil
 }
 
-func loadConfig(ctx *pulumi.Context) (string, string, []VM, *Services, *VMCreationConfig, error) {
+func loadHAProxyConfig(ctx *pulumi.Context) map[string]HAProxyServiceConfig {
+	cfg := config.New(ctx, "")
+
+	var haproxyConfig map[string]HAProxyServiceConfig
+
+	configStr := cfg.Get("haproxyServices")
+	if configStr == "" {
+		return getDefaultHAProxyConfig()
+	}
+
+	if err := json.Unmarshal([]byte(configStr), &haproxyConfig); err != nil {
+		ctx.Log.Warn(fmt.Sprintf("Failed to parse haproxy config, using defaults: %v", err), nil)
+		return getDefaultHAProxyConfig()
+	}
+
+	return haproxyConfig
+}
+
+func loadConfig(ctx *pulumi.Context) (string, string, []VM, *Services, *VMCreationConfig, map[string]HAProxyServiceConfig, error) {
 	cfg := config.New(ctx, "")
 	vmPassword := cfg.Require("password")
 	gateway := cfg.Require("gateway")
+
+	haproxyConfig := loadHAProxyConfig(ctx)
 
 	var vms []VM
 	cfg.RequireObject("vms", &vms)
@@ -59,7 +81,7 @@ func loadConfig(ctx *pulumi.Context) (string, string, []VM, *Services, *VMCreati
 	// Load VM creation config with defaults
 	var vmCreationConfig VMCreationConfig
 	cfg.TryObject("vmCreation", &vmCreationConfig)
-	
+
 	// Set defaults if not provided
 	if vmCreationConfig.BatchSize == 0 {
 		vmCreationConfig.BatchSize = 3
@@ -74,14 +96,62 @@ func loadConfig(ctx *pulumi.Context) (string, string, []VM, *Services, *VMCreati
 	for i := range vms {
 		// iPXE boot VMs (like Harvester) don't need a template - they boot from ISO
 		if vms[i].BootMethod != "ipxe" && vms[i].TemplateID == 0 {
-			return "", "", nil, nil, nil, fmt.Errorf("VM '%s' has no templateId set. Template ID is required for bootMethod '%s'", vms[i].Name, vms[i].BootMethod)
+			return "", "", nil, nil, nil, nil, fmt.Errorf("VM '%s' has no templateId set. Template ID is required for bootMethod '%s'", vms[i].Name, vms[i].BootMethod)
 		}
 		if vms[i].Name == "" {
-			return "", "", nil, nil, nil, fmt.Errorf("VM at index %d has no name set", i)
+			return "", "", nil, nil, nil, nil, fmt.Errorf("VM at index %d has no name set", i)
 		}
-		if len(vms[i].IPs) == 0 {
-			return "", "", nil, nil, nil, fmt.Errorf("VM '%s' has no IPs configured", vms[i].Name)
+
+		// iPXE VMs don't need IPs (they use DHCP)
+		if vms[i].BootMethod != "ipxe" && len(vms[i].IPs) == 0 {
+			return "", "", nil, nil, nil, nil, fmt.Errorf("VM '%s' has no IPs configured (required for non-iPXE VMs)", vms[i].Name)
 		}
+
+		// Validate iPXE/Harvester specific configuration
+		if vms[i].BootMethod == "ipxe" {
+			if vms[i].IPXEConfig == nil {
+				return "", "", nil, nil, nil, nil, fmt.Errorf("VM '%s' uses iPXE boot but has no ipxeConfig", vms[i].Name)
+			}
+
+			isoCount := len(vms[i].IPXEConfig.ISOFiles)
+			nodeCount := vms[i].Count
+
+			if isoCount == 0 {
+				return "", "", nil, nil, nil, nil, fmt.Errorf("VM '%s' uses iPXE but has no ISO files configured", vms[i].Name)
+			}
+
+			// Critical validation: single ISO can only create single node
+			if isoCount == 1 && nodeCount > 1 {
+				return "", "", nil, nil, nil, nil, fmt.Errorf("VM '%s': Cannot create %d nodes with only 1 ISO. For Harvester clustering, provide 2 ISOs (create + join)",
+					vms[i].Name, nodeCount)
+			}
+
+			// Warn about even node counts for Harvester
+			if nodeCount == 2 {
+				ctx.Log.Error(fmt.Sprintf("CRITICAL: VM '%s' has 2 nodes - this breaks etcd quorum! Use 1 or 3+ nodes", vms[i].Name), nil)
+				return "", "", nil, nil, nil, nil, fmt.Errorf("VM '%s': 2-node Harvester cluster breaks etcd quorum. Use 1 node (no HA) or 3+ nodes (with HA)", vms[i].Name)
+			}
+
+			// Check for create/join pattern in ISO names
+			if isoCount > 1 && nodeCount > 1 {
+				hasCreate, hasJoin := false, false
+				for _, iso := range vms[i].IPXEConfig.ISOFiles {
+					isoLower := strings.ToLower(iso)
+					if strings.Contains(isoLower, "create") || strings.Contains(isoLower, "master") || strings.Contains(isoLower, "init") {
+						hasCreate = true
+					}
+					if strings.Contains(isoLower, "join") || strings.Contains(isoLower, "worker") || strings.Contains(isoLower, "add") {
+						hasJoin = true
+					}
+				}
+
+				if !hasCreate || !hasJoin {
+					ctx.Log.Warn(fmt.Sprintf("VM '%s': ISO names should contain 'create'/'master' and 'join'/'worker' for automatic role detection. Will use positional logic (first=create, rest=join)", vms[i].Name), nil)
+				}
+			}
+		}
+
+		// Set defaults
 		if vms[i].BootMethod == "" {
 			vms[i].BootMethod = "cloud-init"
 		}
@@ -109,7 +179,7 @@ func loadConfig(ctx *pulumi.Context) (string, string, []VM, *Services, *VMCreati
 	if len(enabledServices) > 0 {
 		ctx.Log.Info(fmt.Sprintf("Services: Found enabled services: %v", enabledServices), nil)
 	}
-	return vmPassword, gateway, vms, &services, &vmCreationConfig, nil
+	return vmPassword, gateway, vms, &services, &vmCreationConfig, haproxyConfig, nil
 }
 
 func getEnabledServices(services *Services) []string {
@@ -144,52 +214,71 @@ func createVMs(ctx *pulumi.Context, provider *proxmoxve.Provider, vms []VM, vmPa
 	// Process each VM group
 	for _, vmDef := range vms {
 		count := vmDef.Count
-		
+
 		// Skip if count is 0
 		if count == 0 {
 			ctx.Log.Info(fmt.Sprintf("Skipping VM group '%s' (count is 0)", vmDef.Name), nil)
 			continue
 		}
 
-		ctx.Log.Info(fmt.Sprintf("Creating VM group '%s' (%d VMs from template %d)", 
+		ctx.Log.Info(fmt.Sprintf("Creating VM group '%s' (%d VMs from template %d)",
 			vmDef.Name, count, vmDef.TemplateID), nil)
 
 		var groupVMs []*vm.VirtualMachine
-		
+
 		for i := range count {
 			vmName := fmt.Sprintf("%s-%d", vmDef.Name, i)
-			
+
+			nodeName := vmDef.ProxmoxNode
+			if vmDef.BootMethod == "ipxe" {
+				// Distribute Harvester nodes across different Proxmox hosts
+				proxmoxNodes := []string{"proxmox-1", "proxmox-2", "proxmox-3"}
+				nodeName = proxmoxNodes[int(i)%len(proxmoxNodes)]
+				ctx.Log.Info(fmt.Sprintf("  Harvester node %d will be on %s", i+1, nodeName), nil)
+			}
 			// Get dependency on last VM from same template
 			var dependsOn []pulumi.Resource
-			if lastVM, exists := lastVMPerTemplate[vmDef.TemplateID]; exists {
-				dependsOn = []pulumi.Resource{lastVM}
-				ctx.Log.Info(fmt.Sprintf("  [%d/%d] %s (waits for previous VM)", i+1, count, vmName), nil)
-			} else {
-				ctx.Log.Info(fmt.Sprintf("  [%d/%d] %s (first from template %d)", i+1, count, vmName, vmDef.TemplateID), nil)
+			if vmDef.BootMethod == "ipxe" && i > 0 {
+				// For Harvester join nodes, depend on the create node (first in group)
+				if len(groupVMs) > 0 {
+					dependsOn = []pulumi.Resource{groupVMs[0]}
+					ctx.Log.Info(fmt.Sprintf("  [%d/%d] %s (JOIN - waits for create node)", i+1, count, vmName), nil)
+				}
+			} else if vmDef.BootMethod == "ipxe" && i == 0 {
+				ctx.Log.Info(fmt.Sprintf("  [%d/%d] %s (CREATE - initializes cluster)", i+1, count, vmName), nil)
+			} else if vmDef.TemplateID > 0 {
+				// For regular VMs, use template-based dependency
+				if lastVM, exists := lastVMPerTemplate[vmDef.TemplateID]; exists {
+					dependsOn = []pulumi.Resource{lastVM}
+					ctx.Log.Info(fmt.Sprintf("  [%d/%d] %s (waits for previous VM)", i+1, count, vmName), nil)
+				} else {
+					ctx.Log.Info(fmt.Sprintf("  [%d/%d] %s (first from template %d)", i+1, count, vmName, vmDef.TemplateID), nil)
+				}
 			}
-			
+
 			vmInstance, err := createVMWithRetry(
 				ctx,
 				provider,
 				i,
 				vmDef,
-				vmDef.ProxmoxNode,
+				nodeName,
 				vmDef.Gateway,
 				vmPassword,
 				vmCreationConfig.MaxRetries,
 				dependsOn,
 			)
-			
+
 			if err != nil {
 				return nil, fmt.Errorf("failed to create VM %s: %w", vmName, err)
 			}
 
 			groupVMs = append(groupVMs, vmInstance)
-			
-			// Update last VM for this template
-			lastVMPerTemplate[vmDef.TemplateID] = vmInstance
+
+			if vmDef.TemplateID > 0 {
+				lastVMPerTemplate[vmDef.TemplateID] = vmInstance
+			}
 		}
-		
+
 		vmGroups[vmDef.Name] = groupVMs
 	}
 
@@ -201,22 +290,63 @@ func createVMs(ctx *pulumi.Context, provider *proxmoxve.Provider, vms []VM, vmPa
 	return vmGroups, nil
 }
 
+func validateHarvesterConfig(ctx *pulumi.Context, vms []VM) error {
+	for _, vmDef := range vms {
+		if vmDef.BootMethod == "ipxe" && vmDef.IPXEConfig != nil {
+			isoCount := len(vmDef.IPXEConfig.ISOFiles)
+			nodeCount := vmDef.Count
+
+			if isoCount == 0 {
+				return fmt.Errorf("harvester VM group '%s' requires at least one ISO file", vmDef.Name)
+			}
+
+			if isoCount == 1 && nodeCount > 1 {
+				return fmt.Errorf("harvester VM group '%s': Cannot create %d nodes with only 1 ISO. For clustering, provide 2 ISOs (create + join)",
+					vmDef.Name, nodeCount)
+			}
+
+			// If multiple ISOs, check we have both create and join patterns
+			if isoCount > 1 && nodeCount > 1 {
+				hasCreate, hasJoin := false, false
+				for _, iso := range vmDef.IPXEConfig.ISOFiles {
+					isoLower := strings.ToLower(iso)
+					if strings.Contains(isoLower, "create") || strings.Contains(isoLower, "master") || strings.Contains(isoLower, "init") {
+						hasCreate = true
+					}
+					if strings.Contains(isoLower, "join") || strings.Contains(isoLower, "worker") || strings.Contains(isoLower, "add") {
+						hasJoin = true
+					}
+				}
+
+				// Only warn, don't error - fallback to positional logic
+				if !hasCreate || !hasJoin {
+					ctx.Log.Warn(fmt.Sprintf("Harvester VM group '%s': ISO names should contain 'create' or 'join' for automatic detection. Will use positional logic (first=create, rest=join)", vmDef.Name), nil)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func buildGlobalDependency(vmGroups map[string][]*vm.VirtualMachine, vms []VM) map[string]interface{} {
 	globalDeps := make(map[string]interface{})
 
 	for groupName, vmList := range vmGroups {
 		globalDeps[groupName+"-vms"] = vmList
 
-		var ips []string
 		for _, vmDef := range vms {
 			if vmDef.Name == groupName {
-				for i := 0; i < len(vmList) && i < len(vmDef.IPs); i++ {
-					ips = append(ips, vmDef.IPs[i])
+				// Only store IPs if they exist
+				if len(vmDef.IPs) > 0 {
+					globalDeps[groupName+"-ips"] = vmDef.IPs
+				} else {
+					// Store empty slice or a marker for DHCP
+					globalDeps[groupName+"-ips"] = []string{}
+					globalDeps[groupName+"-ip-type"] = "DHCP"
 				}
 				break
 			}
 		}
-		globalDeps[groupName+"-ips"] = ips
 	}
 	return globalDeps
 }

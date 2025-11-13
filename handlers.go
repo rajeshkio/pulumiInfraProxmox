@@ -20,24 +20,91 @@ var serviceHandlers = map[string]ServiceHandler{
 	// "talos":     handleTalosService,
 }
 
+func getDefaultHAProxyConfig() map[string]HAProxyServiceConfig {
+	return map[string]HAProxyServiceConfig{
+		"rke2": {
+			APIPort:        6443,
+			SupervisorPort: 9345,
+		},
+		"k3s": {
+			APIPort: 6443,
+		},
+		"kubeadm": {
+			APIPort: 6443,
+		},
+	}
+}
+
+func discoverKubernetesBackedns(deps map[string]interface{}) []HAProxyBackend {
+	backends := []HAProxyBackend{}
+
+	haproxyConfig, ok := deps["haproxy-config"].(map[string]HAProxyServiceConfig)
+	if !ok || haproxyConfig == nil {
+		// Fallback to defaults if not found
+		haproxyConfig = getDefaultHAProxyConfig()
+	}
+
+	for service, config := range haproxyConfig {
+		depKey := fmt.Sprintf("%s-servers-ips", service)
+
+		ips, ok := deps[depKey].([]string)
+		if !ok || len(ips) == 0 {
+			continue
+		}
+
+		// Main Kubernetes API
+		if config.APIPort > 0 {
+			backends = append(backends, HAProxyBackend{
+				Name:         fmt.Sprintf("%s-api", service),
+				IPs:          ips,
+				FrontendPort: config.APIPort,
+				BackendPort:  6443, // All K8s APIs run on 6443
+			})
+		}
+
+		// Supervisor port (for RKE2)
+		if config.SupervisorPort > 0 {
+			backends = append(backends, HAProxyBackend{
+				Name:         fmt.Sprintf("%s-supervisor", service),
+				IPs:          ips,
+				FrontendPort: config.SupervisorPort,
+				BackendPort:  config.SupervisorPort,
+			})
+		}
+
+		// Extra ports
+		for name, port := range config.ExtraPorts {
+			backends = append(backends, HAProxyBackend{
+				Name:         fmt.Sprintf("%s-%s", service, name),
+				IPs:          ips,
+				FrontendPort: port,
+				BackendPort:  port,
+			})
+		}
+	}
+
+	return backends
+}
+
 func handleHAProxyService(ctx *pulumi.Context, serviceCtx ServiceContext) error {
 	ctx.Log.Info(fmt.Sprintf("Installing HAProxy service on %d VMs", len(serviceCtx.VMs)), nil)
 
-	backendDiscovery := serviceCtx.ServiceConfig.BackendDiscovery
-	if backendDiscovery == "" {
-		return fmt.Errorf("HAProxy service requires backend-discovery configuration")
-	}
-	ctx.Log.Info(fmt.Sprintf("Looking for backend IPs from: %s", backendDiscovery), nil)
+	backends := discoverKubernetesBackedns(serviceCtx.GlobalDeps)
 
-	backendIPs, ok := serviceCtx.GlobalDeps[backendDiscovery+"-ips"].([]string)
-	if !ok {
-		return fmt.Errorf("HAProxy needs backend IPs from '%s' but they are not available", backendDiscovery)
+	if len(backends) == 0 {
+		ctx.Log.Info("No Kuberneres services deployd, skipping HAProxy config", nil)
+		return nil
 	}
 
+	ctx.Log.Info(fmt.Sprintf("Found %d kubernetes backends to configure", len(backends)), nil)
+
+	for _, backend := range backends {
+		ctx.Log.Info(fmt.Sprintf("   - %s on port %d with %d servers", backend.Name, backend.FrontendPort, len(backend.IPs)), nil)
+	}
 	for i, lbVM := range serviceCtx.VMs {
 		lbIP := serviceCtx.IPs[i]
-		ctx.Log.Info(fmt.Sprintf("Installing HAProxy on %s with backends: %v", lbIP, backendIPs), nil)
-		cmd, err := installHaProxy(ctx, lbIP, lbVM, backendIPs, serviceCtx.VMPassword, backendDiscovery)
+		ctx.Log.Info(fmt.Sprintf("Installing HAProxy on %s with %d backends:", lbIP, len(backends)), nil)
+		cmd, err := installHAProxyMultiBackend(ctx, lbIP, lbVM, backends, serviceCtx.VMPassword)
 		if err != nil {
 			return fmt.Errorf("HAProxy installation failed on %s: %w", lbIP, err)
 		}
@@ -46,6 +113,124 @@ func handleHAProxyService(ctx *pulumi.Context, serviceCtx ServiceContext) error 
 	}
 	ctx.Log.Info("HAProxy service installed successfully", nil)
 	return nil
+}
+
+func generateMultiBackendConfig(backends []HAProxyBackend) string {
+	var config strings.Builder
+	config.WriteString(`global
+    log /dev/log local0
+    log /dev/log local1 notice
+    chroot /var/lib/haproxy
+    stats socket /run/haproxy/admin.sock mode 660 level admin
+    stats timeout 30s
+    user haproxy
+    group haproxy
+    daemon
+
+defaults
+    log     global
+    mode    tcp
+    option  tcplog
+    option  dontlognull
+    timeout connect 5000
+    timeout client  50000
+    timeout server  50000
+
+`)
+
+	// Add stats endpoint
+	config.WriteString(`listen stats
+    bind *:8404
+    stats enable
+    stats uri /stats
+    stats refresh 30s
+    stats show-node
+    stats show-legends
+
+`)
+
+	// Generate frontend and backend for each Kubernetes service
+	for _, backend := range backends {
+		// Frontend configuration
+		config.WriteString(fmt.Sprintf(`# %s Kubernetes API Frontend
+frontend %s_frontend
+    bind *:%d
+    mode tcp
+    option tcplog
+    default_backend %s_backend
+
+`, strings.ToUpper(backend.Name), backend.Name, backend.FrontendPort, backend.Name))
+
+		// Backend configuration
+		config.WriteString(fmt.Sprintf(`backend %s_backend
+    mode tcp
+    balance roundrobin
+    option tcp-check
+`, backend.Name))
+
+		// Add each server in the backend pool
+		for i, ip := range backend.IPs {
+			config.WriteString(fmt.Sprintf("    server %s-%d %s:%d check fall 3 rise 2\n",
+				backend.Name, i+1, ip, backend.BackendPort))
+		}
+		config.WriteString("\n")
+	}
+
+	return config.String()
+}
+
+func installHAProxyMultiBackend(ctx *pulumi.Context, lbIP string, lbVM *vm.VirtualMachine, backends []HAProxyBackend, password string) (*remote.Command, error) {
+
+	// Generate the configuration
+	haproxyConfig := generateMultiBackendConfig(backends)
+
+	// Create a multi-line install script
+	installScript := fmt.Sprintf(`
+echo "Installing HAProxy on load balancer %s"
+
+# Update system
+sudo apt update -y 
+sudo apt install -y haproxy
+
+# Backup original config
+sudo cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.bak || true
+
+# Write new configuration
+sudo tee  /etc/haproxy/haproxy.cfg << 'EOF'
+%s
+EOF
+
+# Validate configuration
+sudo haproxy -f /etc/haproxy/haproxy.cfg -c
+
+# Enable and restart HAProxy
+sudo systemctl enable haproxy
+sudo systemctl restart haproxy
+
+# Show status
+sudo systemctl status haproxy --no-pager
+
+echo "HAProxy installation completed with %d backends configured"
+`, lbIP, haproxyConfig, len(backends))
+
+	// Deploy via remote command
+	return remote.NewCommand(ctx, fmt.Sprintf("haproxy-install-%s", lbIP),
+		&remote.CommandArgs{
+			Connection: &remote.ConnectionArgs{
+				Host:           pulumi.String(lbIP),
+				User:           pulumi.String("rajeshk"),
+				PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+				PerDialTimeout: pulumi.IntPtr(30),
+				DialErrorLimit: pulumi.IntPtr(20),
+			},
+			Create:   pulumi.String(installScript),
+			Triggers: pulumi.Array{pulumi.String("always-run")},
+		},
+		pulumi.DependsOn([]pulumi.Resource{lbVM}),
+		pulumi.Timeouts(&pulumi.CustomTimeouts{
+			Create: "10m",
+		}),
+	)
 }
 
 func handleK3sService(ctx *pulumi.Context, serviceCtx ServiceContext) error {
@@ -101,128 +286,6 @@ func handleK3sService(ctx *pulumi.Context, serviceCtx ServiceContext) error {
 	return nil
 }
 
-// func handleConfigureIPXEBoot(ctx *pulumi.Context, actionCtx ActionContext) error {
-// 	template := actionCtx.Templates
-// 	config := template.IPXEConfig
-
-// 	if template.BootMethod != "ipxe" {
-// 		return fmt.Errorf("configure-ipxe-boot action requires bootMethod: ipxe")
-// 	}
-
-// 	// Simple approach: just log which script file the VM will use
-// 	scriptName := fmt.Sprintf("harvester-%s.ipxe", config.Version)
-// 	scriptURL := fmt.Sprintf("%s/%s", config.BootServerURL, scriptName)
-
-// 	for _, vmIP := range actionCtx.IPs {
-// 		ctx.Log.Info(fmt.Sprintf("VM %s will boot using script: %s", vmIP, scriptURL), nil)
-// 	}
-
-// 	return nil
-// }
-
-func installHaProxy(ctx *pulumi.Context, lbIP string, vmDependency pulumi.Resource, backendIPs []string, vmPassword string, backendDiscovery string) (*remote.Command, error) {
-
-	ctx.Log.Info("Print from installHaProxy", nil)
-	var backendServers strings.Builder
-	serviceName := "k3s"
-	if strings.Contains(backendDiscovery, "rke2") {
-		serviceName = "rke2"
-	}
-	for i, serverIP := range backendIPs {
-		backendServers.WriteString(fmt.Sprintf("    server %s-server-%d %s:6443 check\n", serviceName, i+1, serverIP))
-	}
-
-	// RKE2 needs 9345 port to join the nodes
-	var rke2SupervisorServers strings.Builder
-	if serviceName == "rke2" {
-		for i, serverIP := range backendIPs {
-			rke2SupervisorServers.WriteString(fmt.Sprintf("    server %s-server-%d %s:9345 check\n", serviceName, i+1, serverIP))
-		}
-	}
-
-	rke2Section := ""
-	if serviceName == "rke2" {
-		rke2Section = fmt.Sprintf(`
-# RKE2 Supervisor API (port 9345) - Required for server join operations
-frontend rke2-supervisor
-    bind *:9345
-    mode tcp
-    default_backend rke2-supervisor-servers
-
-backend rke2-supervisor-servers
-    mode tcp
-    balance roundrobin
-%s`, rke2SupervisorServers.String())
-	}
-	haProxyConfig := fmt.Sprintf(`
-global
-    daemon
-    maxconn 4096
-    log stdout local0
-
-defaults
-    mode tcp
-    timeout connect 5000ms
-    timeout client 50000ms
-    timeout server 50000ms
-    option tcplog
-    log global
-
-# K3s API Server Load Balancer
-frontend k8s-api
-    bind *:6443
-    mode tcp
-    default_backend k8s-servers
-
-backend k8s-servers
-    mode tcp
-    balance roundrobin
-%s
-	%s`, backendServers.String(), rke2Section)
-
-	installCmd := fmt.Sprintf(`
-		# Update package list
-		sudo apt update
-		
-		# Install HAProxy
-		sudo apt install -y haproxy
-		
-		# Backup original config
-		sudo cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.backup
-		
-		# Create new HAProxy configuration
-		sudo tee /etc/haproxy/haproxy.cfg << 'EOF'
-%s
-EOF
-		
-		# Enable and start HAProxy
-		sudo systemctl enable haproxy
-		sudo systemctl restart haproxy
-		
-		# Check HAProxy status
-		sudo systemctl status haproxy --no-pager
-		
-		echo "HAProxy installed and configured successfully"
-		echo "K3s API accessible via: https://%s:6443"
-	`, haProxyConfig, lbIP)
-
-	resourceName := fmt.Sprintf("haproxy-install-%s", strings.ReplaceAll(lbIP, ".", "-"))
-
-	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
-		Connection: &remote.ConnectionArgs{
-			Host:           pulumi.String(lbIP),
-			User:           pulumi.String("rajeshk"),
-			PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
-			PerDialTimeout: pulumi.IntPtr(30),
-			DialErrorLimit: pulumi.IntPtr(20),
-		},
-		Create:   pulumi.String(installCmd),
-		Triggers: pulumi.Array{pulumi.String("always-run")},
-	}, pulumi.DependsOn([]pulumi.Resource{vmDependency}))
-	ctx.Log.Info(fmt.Sprintf("install haproxy error %s: ", err), nil)
-	return cmd, err
-}
-
 func installK3SServer(ctx *pulumi.Context, lbIP, vmPassword, serverIP string, vmDependency pulumi.Resource, isFirstServer bool, k3sToken pulumi.StringOutput, haproxyDependency pulumi.Resource) (*remote.Command, error) {
 	var k3sCommand pulumi.StringInput
 
@@ -231,7 +294,7 @@ func installK3SServer(ctx *pulumi.Context, lbIP, vmPassword, serverIP string, vm
 			sudo tee /etc/resolv.conf << 'EOF'
 nameserver 192.168.90.1
 EOF
-			curl -sfL https://get.k3s.io | sudo sh -s - server \
+			curl -L https://get.k3s.io | sudo sh -s - server \
 				--cluster-init --tls-san=%s --tls-san=$(hostname -I | awk '{print $1}') \
 				--write-kubeconfig-mode 644
 			sudo systemctl enable --now k3s
@@ -316,7 +379,7 @@ func getK3sKubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, vm
 		done
 		sleep 2
 
-		sudo cat /etc/rancher/k3s/k3s.yaml | sed 's/127.0.0.1:6443/%s:6443/g'`, lbIP)
+		sudo cat /etc/rancher/k3s/k3s.yaml | sed 's/127.0.0.1:6443/%s:6444/g'`, lbIP) // k3s kubeconfig has frontend port to 6444 as per the
 
 	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
 		Connection: &remote.ConnectionArgs{
@@ -334,7 +397,7 @@ func getK3sKubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, vm
 		return err
 	}
 
-	kubeconfigPath := "./kubeconfig.yaml"
+	kubeconfigPath := "./k3s-kubeconfig.yaml"
 	_, err = local.NewFile(ctx, "save-kubeconfig", &local.FileArgs{
 		Filename: pulumi.String(kubeconfigPath),
 		Content:  cmd.Stdout,
@@ -359,9 +422,7 @@ func handleRKE2Service(ctx *pulumi.Context, serviceCtx ServiceContext) error {
 	}
 	lbIP := lbIPs[0]
 
-	// ========================================
-	// PHASE 1: Install Server (Control Plane)
-	// ========================================
+	//Install Server (Control Plane)
 	controlPlaneNodes := serviceCtx.ServiceConfig.ControlPlane
 	if len(controlPlaneNodes) == 0 {
 		return fmt.Errorf("rke2 service requires control-plane nodes configured")
@@ -429,9 +490,7 @@ func handleRKE2Service(ctx *pulumi.Context, serviceCtx ServiceContext) error {
 
 	ctx.Log.Info(fmt.Sprintf("RKE2 service installed on %d servers", len(serverVMs)), nil)
 
-	// ========================================
-	// PHASE 2: Install Workers (Agents)
-	// ========================================
+	// Install Workers (Agents)
 	workerNodes := serviceCtx.ServiceConfig.Workers
 	if len(workerNodes) == 0 {
 		ctx.Log.Info("No worker nodes configured for RKE2", nil)
@@ -646,7 +705,7 @@ func getRKE2Kubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, v
 }
 
 func handleKubeadmService(ctx *pulumi.Context, serviceCtx ServiceContext) error {
-	ctx.Log.Info(fmt.Sprintf("Installing Kubeadm Kubernetes cluster"), nil)
+	ctx.Log.Info("Installing Kubeadm Kubernetes cluster", nil)
 
 	controlPlaneNodes := serviceCtx.ServiceConfig.ControlPlane
 	if len(controlPlaneNodes) == 0 {
@@ -1077,29 +1136,75 @@ func handleHarvesterService(ctx *pulumi.Context, serviceCtx ServiceContext) erro
 	bootServerURL := getConfigString(config, "boot-server-url", "http://192.168.90.103:8080")
 
 	// Check if there are any Harvester VMs configured
-	var harvesterVMCount int
+	var harvesterVMs []*vm.VirtualMachine
+
 	for _, targetName := range targets {
 		if vms, ok := serviceCtx.GlobalDeps[targetName+"-vms"]; ok {
-			harvesterVMCount += len(vms.([]*vm.VirtualMachine))
+			vmList := vms.([]*vm.VirtualMachine)
+			harvesterVMs = append(harvesterVMs, vmList...)
 		}
 	}
 
-	if harvesterVMCount == 0 {
+	if len(harvesterVMs) == 0 {
 		ctx.Log.Info("Harvester service enabled but no VMs with bootMethod: ipxe found - skipping", nil)
 		ctx.Log.Info("Note: Harvester VMs auto-configure via iPXE boot - no post-deployment needed", nil)
 		return nil
 	}
 
-	// Log configuration info
-	scriptName := fmt.Sprintf("harvester-%s.ipxe", version)
-	scriptURL := fmt.Sprintf("%s/%s", bootServerURL, scriptName)
+	nodeCount := len(harvesterVMs)
+	if nodeCount == 2 {
+		return fmt.Errorf("CRITICAL: Harvester cannot run with 2 nodes - this breaks etcd quorum. Use 1 node (no HA) or 3+ nodes (with HA)")
+	}
 
-	ctx.Log.Info("Harvester Deployment Information:", nil)
-	ctx.Log.Info(fmt.Sprintf("  - Version: %s", version), nil)
-	ctx.Log.Info(fmt.Sprintf("  - Boot Script: %s", scriptURL), nil)
-	ctx.Log.Info(fmt.Sprintf("  - Nodes: %d VMs configured", harvesterVMCount), nil)
-	ctx.Log.Info("VMs will boot from iPXE and auto-configure Harvester cluster", nil)
-	ctx.Log.Info("  - Access UI at: https://<first-vm-ip>:8443 after boot completes", nil)
+	if nodeCount > 1 && nodeCount%2 == 0 {
+		ctx.Log.Warn(fmt.Sprintf("WARNING: Even number of nodes (%d) is not recommended. Use odd numbers (1, 3, 5, 7) for proper etcd quorum", nodeCount), nil)
+		ctx.Log.Warn("Consider adjusting to 3, 5, or 7 nodes for optimal HA", nil)
+	}
+
+	ctx.Log.Info("=== Harvester HCI Cluster Deployment Plan ===", nil)
+	ctx.Log.Info(fmt.Sprintf("  Version: %s", version), nil)
+	ctx.Log.Info(fmt.Sprintf("  Boot Server: %s", bootServerURL), nil)
+	ctx.Log.Info(fmt.Sprintf("  Total Management Nodes: %d", nodeCount), nil)
+	ctx.Log.Info("  IP Assignment: DHCP (all nodes)", nil)
+
+	switch nodeCount {
+	case 1:
+		ctx.Log.Info("  Mode: Single Node (No HA)", nil)
+	case 3:
+		ctx.Log.Info("  Mode: 3-Node HA (can tolerate 1 failure)", nil)
+	case 5:
+		ctx.Log.Info("  Mode: 5-Node HA (can tolerate 2 failures)", nil)
+	case 7:
+		ctx.Log.Info("  Mode: 7-Node HA (can tolerate 3 failures)", nil)
+	}
+	// Log configuration info
+	ctx.Log.Info("", nil)
+	ctx.Log.Info("Boot Sequence:", nil)
+	for i := range nodeCount {
+		if i == 0 {
+			ctx.Log.Info("  Node 1: harvester-create.iso → creates cluster", nil)
+		} else {
+			ctx.Log.Info(fmt.Sprintf("  Node %d: harvester-join.iso → joins cluster", i+1), nil)
+		}
+	}
+
+	ctx.Log.Info("", nil)
+	ctx.Log.Info("Configuration Files on Boot Server:", nil)
+	ctx.Log.Info(fmt.Sprintf("  Create: %s/versions/%s/harvester-create-config.yaml", bootServerURL, version), nil)
+	ctx.Log.Info(fmt.Sprintf("  Join:   %s/versions/%s/harvester-join-config.yaml", bootServerURL, version), nil)
+	ctx.Log.Info("  Note: VIP, token, and network settings are defined in these configs", nil)
+
+	// Export only the basics
+	ctx.Export("harvester-node-count", pulumi.Int(nodeCount))
+	ctx.Export("harvester-boot-server", pulumi.String(bootServerURL))
+	ctx.Export("harvester-version", pulumi.String(version))
+
+	ctx.Log.Info("", nil)
+	ctx.Log.Info("Post-Installation:", nil)
+	ctx.Log.Info("  • Access UI at VIP defined in config (port 8443)", nil)
+	ctx.Log.Info("  • SSH via: ssh rancher@<node-dhcp-ip>", nil)
+	ctx.Log.Info("  • Installation takes ~10-15 minutes per node", nil)
+	ctx.Log.Info("  • Monitor progress via Proxmox console", nil)
 
 	return nil
 }

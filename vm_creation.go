@@ -30,9 +30,9 @@ func createVMWithRetry(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 
 		if err == nil {
 			if attempt > 1 {
-				ctx.Log.Info(fmt.Sprintf("✓ VM %s created after %d attempts", vmName, attempt), nil)
+				ctx.Log.Info(fmt.Sprintf("VM %s created after %d attempts", vmName, attempt), nil)
 			} else {
-				ctx.Log.Info(fmt.Sprintf("✓ VM %s created", vmName), nil)
+				ctx.Log.Info(fmt.Sprintf("VM %s created", vmName), nil)
 			}
 			return vmInstance, nil
 		}
@@ -48,7 +48,7 @@ func createVMWithRetry(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 		// For any other error, retry with fixed delay
 		if attempt < maxRetries {
 			waitTime := 10 * time.Second
-			ctx.Log.Warn(fmt.Sprintf("⏳ VM creation failed: %v", err), nil)
+			ctx.Log.Warn(fmt.Sprintf("VM creation failed: %v", err), nil)
 			ctx.Log.Info(fmt.Sprintf("   Waiting %v before retry %d/%d...", waitTime, attempt+1, maxRetries), nil)
 			time.Sleep(waitTime)
 			continue
@@ -78,8 +78,6 @@ func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 	var userAccount *vm.VirtualMachineInitializationUserAccountArgs
 	if vmDef.AuthMethod == "ssh-key" {
 		sshKey := strings.TrimSpace(os.Getenv("SSH_PUBLIC_KEY"))
-		//		ctx.Log.Info(fmt.Sprintf("SSH KEY from env first 100 char: %s", sshKey[:100]), nil)
-		//		ctx.Log.Info(fmt.Sprintf("SSH KEY length: %d", len(sshKey)), nil)
 		userAccount = &vm.VirtualMachineInitializationUserAccountArgs{
 			Username: pulumi.String(vmDef.Username),
 			Keys: pulumi.StringArray{
@@ -184,17 +182,87 @@ func createIPXEVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int
 	if vmDef.IPXEConfig == nil {
 		return nil, fmt.Errorf("iPXE boot method requires ipxeconfig")
 	}
+
+	if len(vmDef.IPXEConfig.ISOFiles) == 0 {
+		return nil, fmt.Errorf("iPXE boot requires at least one ISO file in isoFiles")
+	}
+
+	if len(vmDef.IPXEConfig.ISOFiles) == 1 && vmDef.Count > 1 {
+		return nil, fmt.Errorf("cannot create %d nodes with only 1 ISO file. For a cluster, provide at least 2 ISOs (create + join)", vmDef.Count)
+	}
+
 	vmName := fmt.Sprintf("%s-%d", vmDef.Name, vmIndex)
 
-	isoFileName := "harvester-ipxe.iso"
-	if vmDef.IPXEConfig.ISOFileName != "" {
-		isoFileName = vmDef.IPXEConfig.ISOFileName
+	var createISO, joinISO string
+	var createISOs, joinISOs []string
+
+	for _, iso := range vmDef.IPXEConfig.ISOFiles {
+		isoLower := strings.ToLower(iso)
+		if strings.Contains(isoLower, "create") || strings.Contains(isoLower, "master") || strings.Contains(isoLower, "init") {
+			createISOs = append(createISOs, iso)
+		} else if strings.Contains(isoLower, "join") || strings.Contains(isoLower, "worker") || strings.Contains(isoLower, "add") {
+			joinISOs = append(joinISOs, iso)
+		}
 	}
+
+	if len(createISOs) > 0 {
+		createISO = createISOs[0]
+	}
+	if len(joinISOs) > 0 {
+		joinISO = joinISOs[0]
+	}
+
+	var isoFileName string
+	var nodeRole string
+
+	if len(vmDef.IPXEConfig.ISOFiles) == 1 {
+		// Single ISO - only valid for single node
+		isoFileName = vmDef.IPXEConfig.ISOFiles[0]
+		nodeRole = "SINGLE"
+		ctx.Log.Info(fmt.Sprintf("Single node deployment using ISO: %s", isoFileName), nil)
+	} else {
+		// Multiple ISOs - cluster deployment
+		if vmIndex == 0 {
+			// First node uses create ISO
+			if createISO != "" {
+				isoFileName = createISO
+				nodeRole = "CREATE"
+			} else {
+				return nil, fmt.Errorf("no create ISO found (looked for patterns: create, master, init)")
+			}
+		} else {
+			// Other nodes use join ISO
+			if joinISO != "" {
+				isoFileName = joinISO
+				nodeRole = "JOIN"
+			} else {
+				return nil, fmt.Errorf("no join ISO found (looked for patterns: join, worker, add)")
+			}
+		}
+		ctx.Log.Info(fmt.Sprintf("Node %d (%s) using ISO: %s", vmIndex+1, nodeRole, isoFileName), nil)
+	}
+	ctx.Log.Info(fmt.Sprintf("VM %s using ISO: %s", vmName, isoFileName), nil)
 
 	// Build resource options with dependencies
 	opts := []pulumi.ResourceOption{
 		pulumi.Provider(provider),
 		pulumi.DeleteBeforeReplace(true),
+	}
+
+	if vmIndex == 0 {
+		// Create node needs time to initialize cluster
+		opts = append(opts, pulumi.Timeouts(&pulumi.CustomTimeouts{
+			Create: "30m",
+			Update: "30m",
+			Delete: "10m",
+		}))
+	} else {
+		// Join nodes need more time as they wait for create node
+		opts = append(opts, pulumi.Timeouts(&pulumi.CustomTimeouts{
+			Create: "45m",
+			Update: "45m",
+			Delete: "10m",
+		}))
 	}
 
 	// Add dependencies if provided
