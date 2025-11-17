@@ -1,4 +1,8 @@
 config:
+  proxmox-k3s-cluster:features:
+    loadbalancer: false
+    k3s: false
+    harvester: true
   proxmox-k3s-cluster:password:
     secure: AAABAGp/DPzUwE0pABKqUnBiKh3vynSA5B9txL5JQdoEgJFSKZHgWQ==
   proxmox-k3s-cluster:gateway: 192.168.90.1
