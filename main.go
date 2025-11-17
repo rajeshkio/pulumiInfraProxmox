@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 
-	"github.com/muhlba91/pulumi-proxmoxve/sdk/v7/go/proxmoxve/vm"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
@@ -18,63 +17,68 @@ func main() {
 		if err != nil {
 			return fmt.Errorf("failed to setup Proxmox provider: %w", err)
 		}
-		vmPassword, gateway, templates, features, err := loadConfig(ctx)
+		vmPassword, _, vms, services, vmCreationConfig, haproxyConfig, err := loadConfig(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)
 		}
-		enabledTemplates := filterEnabledTemplates(ctx, templates, features)
-		if len(enabledTemplates) == 0 {
-			ctx.Log.Info("No templates enabled - nothing to deploy", nil)
+		//ctx.Log.Info("No VMs configured - nothing to deploy", nil)
+		if len(vms) == 0 {
+			ctx.Log.Info("No VMs configured - nothing to deploy", nil)
 			return nil
 		}
 
-		var allVMs []*vm.VirtualMachine
-		for _, template := range enabledTemplates {
-			count := template.Count
-			if count == 0 {
-				count = 1
-			}
-			proxmoxNode := template.ProxmoxNode
-			if proxmoxNode == "" {
-				proxmoxNode = "proxmox-3" // Use global default
-			}
-			for i := range count {
-				vm, err := createVMFromTemplate(ctx, provider, i, template, proxmoxNode, gateway, vmPassword)
-				if err != nil {
-					return fmt.Errorf("cannot create VM %s: %w", fmt.Sprintf("%s-%d", template.VMName, i), err)
-				}
-				allVMs = append(allVMs, vm)
-				ctx.Log.Info(fmt.Sprintf("Created VM: %s", fmt.Sprintf("%s-%d", template.VMName, i)), nil)
-			}
-		}
+		ctx.Log.Info(fmt.Sprintf("=== PHASE 1: Infrastructure - Creating %d VM groups ===", len(vms)), nil)
 
-		roleGroups, err := groupVMsByRole(allVMs, enabledTemplates)
+		vmGroups, err := createVMs(ctx, provider, vms, vmPassword, vmCreationConfig)
 		if err != nil {
-			return fmt.Errorf("cannot group VM by role")
-		}
-		globalDeps := buildGlobalDependency(roleGroups)
-
-		for roleName, group := range roleGroups {
-			ctx.Log.Info(fmt.Sprintf("Role '%s': %d with VM with IPs %v", roleName, len(group.VMs), group.IPs), nil)
+			return fmt.Errorf("failed to create VMs: %s", err)
 		}
 
-		ctx.Export("totalVMsCreated", pulumi.Int(len(allVMs)))
-		for roleName, group := range roleGroups {
-			ctx.Export(fmt.Sprintf("%s-count", roleName), pulumi.Int(len(group.VMs)))
-			ctx.Export(fmt.Sprintf("%s-ips", roleName), pulumi.StringArray(
-				func() []pulumi.StringInput {
-					result := make([]pulumi.StringInput, len(group.IPs))
-					for i, ip := range group.IPs {
-						result[i] = pulumi.String(ip)
+		totalVMs := 0
+		for groupName, vmList := range vmGroups {
+			totalVMs += len(vmList)
+			ctx.Export(fmt.Sprintf("%s-count", groupName), pulumi.Int(len(vmList)))
+
+			var groupIPs []pulumi.StringInput
+
+			for _, vmDef := range vms {
+				if vmDef.Name == groupName {
+					if len(vmDef.IPs) > 0 {
+						for i := 0; i < len(vmList) && i < len(vmDef.IPs); i++ {
+							groupIPs = append(groupIPs, pulumi.String(vmDef.IPs[i]))
+						}
+						ctx.Export(fmt.Sprintf("%s-ips", groupName), pulumi.StringArray(groupIPs))
+					} else {
+						// For DHCP-based VMs, export a note
+						ctx.Export(fmt.Sprintf("%s-ip-assignment", groupName), pulumi.String("DHCP"))
+						ctx.Log.Info(fmt.Sprintf("VM group %s uses DHCP - no static IPs to export", groupName), nil)
 					}
-					return result
-				}(),
-			))
+					break
+				}
+			}
 		}
+		ctx.Export("totalVMsCreated", pulumi.Int(totalVMs))
+		ctx.Log.Info(fmt.Sprintf("Infrastructure complete: Created %d VMs across %d groups", totalVMs, len(vmGroups)), nil)
 
-		err = executeActions(ctx, enabledTemplates, roleGroups, globalDeps, vmPassword)
-		if err != nil {
-			return fmt.Errorf("failed to execute actions %s", err)
+		if services != nil {
+			ctx.Log.Info("=== PHASE 2: Services - Installing software on VMs ===", nil)
+			globalDeps := buildGlobalDependency(vmGroups, vms)
+			globalDeps["haproxy-config"] = haproxyConfig
+			err = executeServices(ctx, services, vmGroups, globalDeps, vmPassword)
+			if err != nil {
+				return fmt.Errorf("failed to execute services: %w", err)
+			}
+		} else {
+			ctx.Log.Info("No services configured - VMs created without software installation", nil)
+		}
+		ctx.Log.Info("=== DEPLOYMENT COMPLETE ===", nil)
+		ctx.Log.Info(fmt.Sprintf("Infrastructure: %d VMs created", totalVMs), nil)
+
+		if services != nil {
+			enabledServices := getEnabledServices(services)
+			if len(enabledServices) > 0 {
+				ctx.Log.Info(fmt.Sprintf("Services: Installed %v", enabledServices), nil)
+			}
 		}
 		return nil
 	})

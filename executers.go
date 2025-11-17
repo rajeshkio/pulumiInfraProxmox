@@ -3,112 +3,74 @@ package main
 import (
 	"fmt"
 
+	"github.com/muhlba91/pulumi-proxmoxve/sdk/v7/go/proxmoxve/vm"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
-func executeAction(ctx *pulumi.Context, action Action, template VMTemplate, roleGroups RoleGroup, globalDeps map[string]interface{}, vmpassword string) error {
-	actionCtx := ActionContext{
-		VMs:          roleGroups.VMs,
-		IPs:          roleGroups.IPs,
-		GlobalDeps:   globalDeps,
-		ActionConfig: action.Config,
-		VMPassword:   vmpassword,
-		Templates:    template,
+func executeService(ctx *pulumi.Context, serviceName string, config *ServiceConfig, vmGroups map[string][]*vm.VirtualMachine, globalDeps map[string]interface{}, vmPassword string) error {
+	handler, exists := serviceHandlers[serviceName]
+	if !exists {
+		return fmt.Errorf("unknown service: %s", serviceName)
 	}
 
-	if handler, exists := actionHandlers[action.Type]; exists {
-		return handler(ctx, actionCtx)
-	} else {
-		return fmt.Errorf("unknown action type: %s", action.Type)
+	serviceCtx := ServiceContext{
+		ServiceName:   serviceName,
+		GlobalDeps:    globalDeps,
+		Config:        config.Config,
+		VMPassword:    vmPassword,
+		ServiceConfig: config,
 	}
+
+	allTargets := []string{}
+	allTargets = append(allTargets, config.Targets...)
+	allTargets = append(allTargets, config.ControlPlane...)
+	allTargets = append(allTargets, config.Workers...)
+	allTargets = append(allTargets, config.LoadBalancer...)
+
+	for _, target := range allTargets {
+		if vms, exists := vmGroups[target]; exists {
+			serviceCtx.VMs = append(serviceCtx.VMs, vms...)
+			if ips, exists := globalDeps[target+"-ips"].([]string); exists {
+				serviceCtx.IPs = append(serviceCtx.IPs, ips...)
+			}
+		}
+	}
+	if len(serviceCtx.VMs) == 0 {
+		return fmt.Errorf("service %s has no target VMs configured", serviceName)
+	}
+	ctx.Log.Info(fmt.Sprintf("Executing service '%s' on %d VMs", serviceName, len(serviceCtx.VMs)), nil)
+	return handler(ctx, serviceCtx)
 }
-func executeActions(ctx *pulumi.Context, templates []VMTemplate, roleGroups map[string]RoleGroup, globalDeps map[string]interface{}, vmPassword string) error {
-
-	completedActions := make(map[string]bool)
-
-	type ActionItem struct {
-		Template VMTemplate
-		Action   Action
-		ID       string
-	}
-	var remainingActions []ActionItem
-	for _, template := range templates {
-		for _, action := range template.Actions {
-			actionID := fmt.Sprintf("%s-%s", template.Role, action.Type)
-			remainingActions = append(remainingActions, ActionItem{
-				Template: template,
-				Action:   action,
-				ID:       actionID,
-			})
+func executeServices(ctx *pulumi.Context, services *Services, vmGroups map[string][]*vm.VirtualMachine, globalDeps map[string]interface{}, vmPassword string) error {
+	if services.HAProxy != nil && services.HAProxy.Enabled {
+		err := executeService(ctx, "haproxy", services.HAProxy, vmGroups, globalDeps, vmPassword)
+		if err != nil {
+			return fmt.Errorf("failed to execute HAProxy service: %w", err)
 		}
 	}
-	//fmt.Println(len(remainingActions))
-
-	for len(remainingActions) > 0 {
-		executed := false
-		//	fmt.Println(len(remainingActions))
-
-		for i, item := range remainingActions {
-			canExecute := true
-
-			for _, dep := range item.Action.DependsOn {
-				depSatisfied := false
-				//fmt.Println("print my work")
-				if hasRoleCompleted(dep, completedActions) {
-					depSatisfied = true
-					ctx.Log.Info(fmt.Sprintf("Role dependency '%s' satisfied for action '%s'", dep, item.Action.Type), nil)
-				} else if completedActions[dep] {
-					depSatisfied = true
-					ctx.Log.Info(fmt.Sprintf("Action dependency '%s' satisfied for action '%s'", dep, item.Action.Type), nil)
-				} else {
-					ctx.Log.Info(fmt.Sprintf("Dependency '%s' NOT satisfied for action '%s'", dep, item.Action.Type), nil)
-				}
-
-				if !depSatisfied {
-					canExecute = false
-					break
-				}
-			}
-			if canExecute {
-				ctx.Log.Info(fmt.Sprintf("Executing action '%s' for role '%s'", item.Action.Type, item.Template.Role), nil)
-
-				roleGroup := roleGroups[item.Template.Role]
-				err := executeAction(ctx, item.Action, item.Template, roleGroup, globalDeps, vmPassword)
-				if err != nil {
-					return fmt.Errorf("failed to execute action %s for role %s: %w", item.Action.Type, item.Template.Role, err)
-				}
-				completedActions[item.ID] = true
-				remainingActions = append(remainingActions[:i], remainingActions[i+1:]...)
-				executed = true
-				break
-			}
+	if services.K3s != nil && services.K3s.Enabled {
+		err := executeService(ctx, "k3s", services.K3s, vmGroups, globalDeps, vmPassword)
+		if err != nil {
+			return fmt.Errorf("failed to execute K3s service: %w", err)
 		}
-		if !executed {
-			return fmt.Errorf("dependency deadlock - remaining actions have unsatisfied dependencies")
+	}
+	if services.RKE2 != nil && services.RKE2.Enabled {
+		err := executeService(ctx, "rke2", services.RKE2, vmGroups, globalDeps, vmPassword)
+		if err != nil {
+			return fmt.Errorf("failed to execute RKE2 service: %w", err)
 		}
-
+	}
+	if services.Kubeadm != nil && services.Kubeadm.Enabled {
+		err := executeService(ctx, "kubeadm", services.Kubeadm, vmGroups, globalDeps, vmPassword)
+		if err != nil {
+			return fmt.Errorf("failed to execute Kubeadm service: %w", err)
+		}
+	}
+	if services.Harvester != nil && services.Harvester.Enabled {
+		err := executeService(ctx, "harvester", services.Harvester, vmGroups, globalDeps, vmPassword)
+		if err != nil {
+			return fmt.Errorf("failed to execute Harvester service: %w", err)
+		}
 	}
 	return nil
-}
-
-func hasRoleCompleted(role string, completedActions map[string]bool) bool {
-	expectedActions := map[string][]string{
-		"loadbalancer":   {"install-haproxy"},
-		"k3s-server":     {"install-k3s-server", "get-kubeconfig"},
-		"harvester-node": {"configure-ipxe-boot"},
-	}
-	//fmt.Printf("DEBUG: Checking if role '%s' is complete\n", role)
-	if actions, exists := expectedActions[role]; exists {
-		for _, action := range actions {
-			actionID := fmt.Sprintf("%s-%s", role, action)
-			if !completedActions[actionID] {
-				return false
-			}
-		}
-		//	fmt.Printf("DEBUG: Role '%s' IS complete\n", role)
-		return true
-	}
-	//fmt.Printf("DEBUG: Role '%s' not found in expectedActions, returning false\n", role)
-	return false
-
 }
