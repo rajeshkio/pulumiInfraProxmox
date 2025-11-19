@@ -1,9 +1,8 @@
 # PulumiInfraProxmox
 
-A flexible, self-configuring multi-service deployment system using Pulumi and Go. Automatically creates and configures high-availability Kubernetes infrastructure, load balancers, and Harvester nodes on Proxmox VE with dynamic component discovery and feature flags.
+A flexible, service-oriented infrastructure deployment system for Proxmox VE using Pulumi and Go. Deploy high-availability Kubernetes clusters (K3s, RKE2, Kubeadm), Harvester HCI, and HAProxy load balancers with intelligent service discovery and automatic configuration.
 
 ## 🚀 Quick Start
-
 ```bash
 # Clone the repository
 git clone https://github.com/rajeshkio/pulumiInfraProxmox.git 
@@ -22,77 +21,49 @@ export PROXMOX_VE_PASSWORD="your-password"
 export PROXMOX_VE_SSH_PRIVATE_KEY="$(cat ~/.ssh/id_rsa)"
 export SSH_PUBLIC_KEY="$(cat ~/.ssh/id_rsa.pub)"
 
-# Deploy infrastructure with feature flags
+# Deploy infrastructure
 pulumi up
 ```
 
 ## 📁 Project Structure
-
 ```
 pulumiInfraProxmox/
-├── main.go                 # Main Pulumi program & infrastructure logic
-├── types.go               # Data structures & feature flag definitions
-├── handlers.go            # Action handlers for services (HAProxy, K3s, Harvester)
-├── vm_creation.go         # VM creation logic (cloud-init & iPXE boot)
-├── utils.go               # Utility functions & Proxmox provider setup
-├── executers.go           # Action execution engine with dependency resolution
+├── main.go                 # Main Pulumi program & orchestration
+├── types.go               # Data structures & service definitions
+├── handlers.go            # Service handlers (K3s, RKE2, Harvester, HAProxy)
+├── vm_creation.go         # VM creation (cloud-init & iPXE boot)
+├── utils.go               # Configuration loading & utilities
+├── services.go            # Service execution engine
 ├── go.mod                 # Go module dependencies
-├── go.sum                 # Go module checksums
 ├── Pulumi.yaml            # Pulumi project configuration
-├── Pulumi.dev.yaml        # Development stack configuration with feature flags
-├── kubeconfig.yaml        # Auto-generated Kubernetes configuration
-└── proxmox-io-error.md    # Troubleshooting guide for common Proxmox issues
+└── Pulumi.dev.yaml        # Stack configuration with services
 ```
 
-## 🏗️ What This Can Deploy
+## 🏗️ Architecture
 
-### 🎛️ Feature Flags Control Everything
+### Two-Phase Deployment
 
-Choose exactly what you want to deploy:
+1. **Infrastructure Phase**: Creates VMs in batches with proper dependencies
+2. **Services Phase**: Installs and configures software on VMs
 
-```yaml
-features:
-  loadbalancer: true # HAProxy load balancer
-  k3s: true # Kubernetes cluster
-  harvester: false # Harvester HCI platform
-```
+### Smart Service Discovery
 
-### 📦 Available Components
+Services automatically discover their target VMs through the configuration. No manual IP management needed - services find their VMs by target names.
 
-- **HAProxy Load Balancer:** Ubuntu-based with automatic backend discovery
-- **K3s Kubernetes Cluster:** High-availability with 3+ server nodes
-- **Harvester Nodes:** iPXE-booted hyperconverged infrastructure
+## 📦 Available Services
 
-### 🔄 Smart Dependency Management
+### Kubernetes Distributions
+- **K3s**: Lightweight Kubernetes with HA support
+- **RKE2**: Production-grade Kubernetes 
+- **Kubeadm**: Native Kubernetes deployment
 
-- HAProxy automatically discovers K3s server IPs
-- K3s waits for load balancer before starting
-- Kubeconfig extraction waits for K3s cluster readiness
-- All dependencies resolved automatically with proper sequencing
+### Infrastructure Services
+- **HAProxy**: Multi-backend load balancer with dynamic configuration
+- **Harvester**: Hyperconverged infrastructure platform (iPXE boot)
 
-## ⚙️ Prerequisites
-
-### Infrastructure Requirements
-
-- Proxmox VE server with API access
-- VM Templates:
-  - **Ubuntu 22.04** cloud template (VM ID 9000) for load balancer
-  - **SLE Micro** template (VM ID 9001) for K3s servers
-  - **Harvester iPXE ISO** for Harvester nodes
-- Network range with static IP allocation capability
-- NFS or local storage for VM creation
-
-### Local Requirements
-
-- Go 1.23+ installed
-- Pulumi CLI installed (`curl -fsSL https://get.pulumi.com | sh`)
-- SSH key pair for VM authentication
-- Proxmox API credentials with VM creation permissions
-
-## 🔧 Configuration
+## ⚙️ Configuration
 
 ### Environment Variables
-
 ```bash
 # Proxmox Connection
 export PROXMOX_VE_ENDPOINT="https://your-proxmox:8006/api2/json"
@@ -105,311 +76,312 @@ export SSH_PUBLIC_KEY="$(cat ~/.ssh/id_rsa.pub)"
 ```
 
 ### Pulumi Configuration (Pulumi.dev.yaml)
-
 ```yaml
 config:
-  # Feature flags - choose what to deploy
-  proxmox-k3s-cluster:features:
-    loadbalancer: true
-    k3s: true
-    harvester: false
-
-  # VM password for authentication
+  # Core settings
   proxmox-k3s-cluster:password:
-    secure: AAABAGl9s0KsvoAS4g84MUxnyJqWmQLGAeHMbnldANzDkde0yRVTfg==
-
-  # Network configuration
-  proxmox-k3s-cluster:gateway: 192.168.90.1
-
-  # VM templates with roles and dependencies
-  proxmox-k3s-cluster:vm-templates:
-    - count: 3
-      role: k3s-server
-      authMethod: ssh-key # or 'password'
-      ips: ["192.168.90.187", "192.168.90.188", "192.168.90.189"]
-      actions:
-        - type: "install-k3s-server"
-          dependsOn: ["loadbalancer"]
-        - type: "get-kubeconfig"
-          dependsOn: ["k3s-server-install-k3s-server"]
-
-    - count: 1
-      role: loadbalancer
-      authMethod: ssh-key
+    secure: AAABAG...
+  proxmox-k3s-cluster:gateway: "192.168.90.1"
+  
+  # VM Creation Configuration
+  proxmox-k3s-cluster:vmCreation:
+    batchSize: 3        # VMs created in parallel
+    maxRetries: 5       # Retry failed VM creation
+    batchDelay: 10      # Seconds between batches
+  
+  # VM Definitions
+  proxmox-k3s-cluster:vms:
+    # Load Balancer
+    - name: "load-balancer"
+      count: 1
+      templateId: 9000
+      memory: 2048
+      cpu: 2
+      diskSize: 20
       ips: ["192.168.90.195"]
-      actions:
-        - type: "install-haproxy"
-
-    - count: 1
-      role: harvester-node
+      proxmoxNode: "proxmox-2"
+      
+    # K3s Cluster
+    - name: "k3s-servers"
+      count: 3
+      templateId: 9001
+      memory: 10240
+      cpu: 10
+      diskSize: 32
+      ips: ["192.168.90.187", "192.168.90.188", "192.168.90.189"]
+      proxmoxNode: "proxmox-2"
+      
+    # RKE2 Cluster
+    - name: "rke2-servers"
+      count: 3
+      templateId: 9001
+      memory: 10240
+      cpu: 10
+      diskSize: 64
+      ips: ["192.168.90.200", "192.168.90.201", "192.168.90.202"]
+      proxmoxNode: "proxmox-2"
+      
+    # Worker Nodes
+    - name: "workers"
+      count: 2
+      templateId: 9000
+      memory: 10240
+      cpu: 10
+      diskSize: 32
+      ips: ["192.168.90.210", "192.168.90.211"]
+      proxmoxNode: "proxmox-2"
+      
+    # Harvester HCI Nodes (iPXE boot - no template)
+    - name: "harvester-nodes"
+      count: 3
       bootMethod: "ipxe"
-      ips: ["192.168.90.210"]
-      actions:
-        - type: "configure-ipxe-boot"
+      ipxeConfig:
+        isoFiles:
+          - "harvester-create-v1.4.3.iso"
+          - "harvester-join-v1.4.3.iso"
+      memory: 40000
+      cpu: 12
+      diskSize: 600
+      # No IPs - uses DHCP
+      # Automatically distributed across proxmox-1, proxmox-2, proxmox-3
+  
+  # Service Definitions
+  proxmox-k3s-cluster:services:
+    k3s:
+      enabled: true
+      targets: ["k3s-servers"]
+      config:
+        version: "v1.29.0+k3s1"
+        
+    rke2:
+      enabled: true
+      targets: ["rke2-servers", "workers"]
+      config:
+        version: "v1.29.0+rke2r1"
+        serverIPs: ["192.168.90.200"]
+        
+    kubeadm:
+      enabled: false
+      targets: ["kubeadm-servers"]
+      
+    haproxy:
+      enabled: true
+      targets: ["load-balancer"]
+      config:
+        stats:
+          enabled: true
+          port: 8404
+          user: "admin"
+          password: "admin123"
+        backends:
+          - name: "k3s-api"
+            port: 6443
+            targets: ["k3s-servers"]
+          - name: "rke2-api"
+            port: 9345
+            targets: ["rke2-servers"]
+            
+    harvester:
+      enabled: true
+      targets: ["harvester-nodes"]
+      config:
+        version: "v1.4.3"
+        boot-server-url: "http://192.168.90.18"
 ```
 
-## 🚦 Usage Examples
+## 🔄 Boot Methods
 
-### 🎯 Deploy Full Stack
+### Cloud-Init (Default)
+- Used for Ubuntu, SLE Micro, and other cloud-ready templates
+- Requires template with cloud-init installed
+- Supports SSH keys and network configuration
 
-```bash
-# Everything enabled
-pulumi config set-all --path features.loadbalancer=true \
-                     --path features.k3s=true \
-                     --path features.harvester=true
-pulumi up
-```
+### iPXE Boot
+- Used for Harvester bare-metal installations
+- Boots from custom iPXE ISOs
+- Pattern-based ISO selection (create/join)
+- DHCP network configuration only
 
-### 🚀 K3s Development Environment
+## 🎯 Deployment Examples
 
-```bash
-# Just Kubernetes cluster with load balancer
-pulumi config set-all --path features.loadbalancer=true \
-                     --path features.k3s=true \
-                     --path features.harvester=false
-pulumi up
-```
-
-### 🧪 Test Load Balancer Only
-
-```bash
-# Infrastructure testing
-pulumi config set-all --path features.loadbalancer=true \
-                     --path features.k3s=false \
-                     --path features.harvester=false
-pulumi up
-```
-
-### 🔧 Harvester Evaluation
-
-```bash
-# Hyperconverged infrastructure only
-pulumi config set-all --path features.loadbalancer=false \
-                     --path features.k3s=false \
-                     --path features.harvester=true
-pulumi up
-```
-
-## 🔑 Authentication Methods
-
-### SSH Key Authentication (Recommended)
-
+### Full Stack Deployment
 ```yaml
-authMethod: ssh-key
+# Enable all services
+services:
+  k3s:
+    enabled: true
+  rke2:
+    enabled: true
+  haproxy:
+    enabled: true
+  harvester:
+    enabled: true
 ```
 
-- Uses SSH_PUBLIC_KEY environment variable
-- More secure than passwords
-- Works with cloud-init templates
-
-### Password Authentication
-
+### K3s with Load Balancer
 ```yaml
-authMethod: password
+# Just K3s cluster
+services:
+  k3s:
+    enabled: true
+  haproxy:
+    enabled: true
+  rke2:
+    enabled: false
+  harvester:
+    enabled: false
 ```
 
-- Uses vm-password configuration
-- Requires password auth enabled in SSH config
-- Useful for SLE Micro templates
-
-## 📤 Outputs & Access
-
-### Kubernetes Cluster Access
-
-```bash
-# Kubeconfig automatically downloaded
-export KUBECONFIG=./kubeconfig.yaml
-
-# Verify cluster health
-kubectl get nodes
-kubectl get pods -A
-
-# Access via load balancer
-kubectl cluster-info
+### Harvester HCI Only
+```yaml
+# Hyperconverged infrastructure
+services:
+  harvester:
+    enabled: true
+  k3s:
+    enabled: false
 ```
 
-### Deployment Outputs
+## 🔑 Key Features
 
+### Intelligent VM Creation
+- **Batch processing** with configurable parallelism
+- **Automatic retry** on failures with disk resize detection
+- **Template dependency** management
+- **Cross-Proxmox node** distribution for Harvester
+
+### Service-Oriented Architecture
+- Services discover VMs by target names
+- Automatic IP aggregation from multiple VM groups
+- HAProxy dynamically configures backends
+- Proper sequencing with service dependencies
+
+### Harvester iPXE Support
+- **Pattern-based ISO selection**: Automatically detects create vs join ISOs
+- **Node distribution**: Spreads nodes across Proxmox hosts
+- **Sequential deployment**: Join nodes wait for create node
+- **Etcd quorum validation**: Prevents 2-node clusters
+
+## 📤 Outputs
 ```bash
-# Check what was deployed
+# Check deployment results
 pulumi stack output
 
 # Example outputs:
 Outputs:
-    k3s-server-count : 3
-    k3s-server-ips   : ["192.168.90.187", "192.168.90.188", "192.168.90.189"]
-    kubeconfig       : [complete kubeconfig content]
-    kubeconfigPath   : "./kubeconfig.yaml"
-    loadbalancer-ips : ["192.168.90.195"]
-    totalVMsCreated  : 4
-```
-
-## 🔄 Staged Deployments
-
-### Phase 1: Infrastructure
-
-```bash
-# Deploy load balancer first
-pulumi config set features.loadbalancer true
-pulumi config set features.k3s false
-pulumi up
-```
-
-### Phase 2: Add Kubernetes
-
-```bash
-# Add K3s cluster
-pulumi config set features.k3s true
-pulumi up
-```
-
-### Phase 3: Add Harvester
-
-```bash
-# Add hyperconverged infrastructure
-pulumi config set features.harvester true
-pulumi up
+  harvester-node-count: 3
+  harvester-ip-assignment: "DHCP"
+  k3s-servers-count: 3
+  k3s-servers-ips: ["192.168.90.187", "192.168.90.188", "192.168.90.189"]
+  load-balancer-count: 1
+  load-balancer-ips: ["192.168.90.195"]
+  rke2-servers-count: 3
+  rke2-servers-ips: ["192.168.90.200", "192.168.90.201", "192.168.90.202"]
+  totalVMsCreated: 12
 ```
 
 ## 🛠️ Troubleshooting
 
-### Common Issues & Solutions
-
-**Authentication Failures:**
-
+### Harvester Deployment Issues
 ```bash
-# SSH key issues
-error: ssh: handshake failed: ssh: unable to authenticate
+# Check node status
+ssh rancher@<node-dhcp-ip>
+sudo systemctl status rke2-server
+sudo journalctl -u rke2-server -n 50
 
-# Solutions:
-1. Check authMethod matches your template setup
-2. Verify SSH_PUBLIC_KEY environment variable
-3. Ensure templates have cloud-init configured
-4. For SLE Micro: use authMethod: password
+# Verify VIP is active
+ip addr show | grep <vip-address>
+
+# Check cluster formation
+kubectl get nodes
 ```
 
-**Network Unreachable:**
-
+### VM Creation Failures
 ```bash
-# VM not getting IP address
-error: dial tcp: connect: network is unreachable
-
-# Solutions:
-1. Fix typo: ipconfig: "static" (not "statics")
-2. Verify template supports cloud-init
-3. Check Proxmox network configuration
-4. Increase connection timeouts for slow boot
-```
-
-**Dependency Issues:**
-
-```bash
-# Action executed before dependency ready
-# Check dependency configuration:
-actions:
-  - type: "install-k3s-server"
-    dependsOn: ["loadbalancer"]  # Role dependency
-  - type: "get-kubeconfig"
-    dependsOn: ["k3s-server-install-k3s-server"]  # Action dependency
-```
-
-### Debug Mode
-
-```bash
-# Enable verbose logging
+# Enable debug logging
 export PULUMI_DEBUG=true
 pulumi up --logtostderr -v=9 2> debug.log
 
-# Check action execution order
-grep "Executing action" debug.log
+# Check for disk resize errors
+grep "disk resize" debug.log
+
+# Verify template IDs
+grep "templateId" Pulumi.dev.yaml
 ```
 
-### Timeout Issues
-
+### Service Installation Issues
 ```bash
-# For slow VMs, increase timeouts in handlers.go:
-pulumi.Timeouts(&pulumi.CustomTimeouts{
-    Create: "20m",  # Increase from default
-    Update: "20m",
-    Delete: "5m",
-})
+# Check service logs
+pulumi logs --follow
+
+# Verify service targets
+grep -A5 "services:" Pulumi.dev.yaml
+
+# Check IP assignments
+pulumi stack output | grep ips
 ```
 
-## 🏛️ Architecture
+## 📊 Resource Requirements
 
-### 🎯 Action-Based System
+| Component | CPU | Memory | Disk | Network |
+|-----------|-----|--------|------|---------|
+| Load Balancer | 2 | 2GB | 20GB | Static IP |
+| K3s Server | 10 | 10GB | 32GB | Static IP |
+| RKE2 Server | 10 | 10GB | 64GB | Static IP |
+| Worker Node | 10 | 10GB | 32GB | Static IP |
+| Harvester Node | 12 | 40GB | 600GB | DHCP |
 
-Each service is deployed through configurable actions:
+## 🚀 iPXE Setup for Harvester
 
-- **install-haproxy:** Sets up load balancer with K3s backend discovery
-- **install-k3s-server:** Deploys Kubernetes with HA configuration
-- **get-kubeconfig:** Extracts cluster credentials with LB endpoint
-- **configure-ipxe-boot:** Sets up Harvester iPXE boot configuration
+### Create Boot ISOs
+```bash
+# Helper function for building iPXE ISOs
+function ipxemake {
+    # ... see repository for full implementation
+    # Builds harvester-create-v1.4.3.iso and harvester-join-v1.4.3.iso
+}
 
-### 🔗 Smart Dependency Resolution
+# Build ISOs
+ipxemake v1.4.3
+```
 
-1. **Parse Templates:** Load VM configurations with roles and actions
-2. **Filter by Features:** Only include enabled components
-3. **Create VMs:** Deploy infrastructure in parallel
-4. **Group by Role:** Organize VMs for service discovery
-5. **Execute Actions:** Run with automatic dependency resolution
-6. **Global Dependencies:** Share IPs/resources between roles
+### Required Files on Boot Server
+```
+/var/www/pxe/versions/v1.4.3/
+├── harvester-create-config.yaml    # Create node configuration
+├── harvester-join-2-config.yaml    # Join node 2 configuration
+├── harvester-join-3-config.yaml    # Join node 3 configuration
+├── harvester-create-boot.ipxe      # Create node boot script
+├── harvester-join-2-boot.ipxe      # Join node 2 boot script
+└── harvester-join-3-boot.ipxe      # Join node 3 boot script
+```
 
-### 🚀 Boot Methods
+## 🔒 Security Considerations
 
-- **cloud-init:** For Ubuntu and SLE Micro templates
-- **ipxe:** For Harvester bare-metal installations
-
-## 🔒 Security Features
-
-- **SSH Key Authentication:** Preferred over passwords
-- **TLS Certificates:** K3s API secured with proper SANs
-- **Load Balancer Integration:** TLS certificates include LB endpoints
-- **Secret Management:** Passwords stored as Pulumi secrets
-- **Network Isolation:** Components communicate within defined subnets
-
-## 📊 Performance & Timing
-
-### Deployment Times by Component
-
-- **VM Creation:** 80-90s per VM (parallel execution)
-- **HAProxy Setup:** ~30s after VM ready
-- **K3s First Node:** ~3-4 minutes (cluster initialization)
-- **K3s Additional Nodes:** ~2 minutes each (join existing)
-- **Kubeconfig Extraction:** ~15s after cluster ready
-
-### Resource Requirements
-
-- **Load Balancer:** 2 CPU, 2GB RAM, 20GB disk
-- **K3s Servers:** 10 CPU, 10GB RAM, 32GB disk each
-- **Harvester Nodes:** 16 CPU, 40GB RAM, 300GB disk each
+- SSH key authentication preferred over passwords
+- Pulumi secrets for sensitive data
+- TLS certificates for K3s/RKE2 APIs
+- HAProxy stats interface protected
+- Network isolation between services
 
 ## 🤝 Contributing
 
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/new-component`)
-3. Add your component with proper feature flag support
-4. Test with different feature combinations
-5. Update documentation for new features
-6. Submit a pull request with deployment verification
-
-## 🔄 Feature Roadmap
-
-- [ ] **Multi-cloud support:** Extend beyond Proxmox
-- [ ] **Helm deployments:** Automatic application installation
-- [ ] **Monitoring stack:** Prometheus/Grafana integration
-- [ ] **Backup automation:** Automated cluster backups
-- [ ] **Rolling updates:** Zero-downtime cluster upgrades
+2. Create a feature branch (`git checkout -b feature/new-service`)
+3. Add service handler in `handlers.go`
+4. Update types in `types.go`
+5. Test with different configurations
+6. Submit pull request with examples
 
 ## 📝 License
 
 MIT License - see LICENSE file for details
 
-## 🔗 Related Resources
+## 🔗 Resources
 
+- [Pulumi Documentation](https://www.pulumi.com/docs/)
+- [Proxmox VE API](https://pve.proxmox.com/wiki/Proxmox_VE_API)
 - [K3s Documentation](https://docs.k3s.io/)
-- [Pulumi Go SDK](https://www.pulumi.com/docs/languages-sdks/go/)
-- [Proxmox VE API](https://pve.proxmox.com/pve-docs/api-viewer/)
-- [HAProxy Configuration](https://docs.haproxy.org/)
+- [RKE2 Documentation](https://docs.rke2.io/)
 - [Harvester Documentation](https://docs.harvesterhci.io/)
-- [Cloud-init Documentation](https://cloud-init.readthedocs.io/)
+- [HAProxy Documentation](http://www.haproxy.org/)
