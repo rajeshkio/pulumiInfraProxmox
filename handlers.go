@@ -14,108 +14,203 @@ import (
 var serviceHandlers = map[string]ServiceHandler{
 	"k3s":       handleK3sService,
 	"rke2":      handleRKE2Service,
-	"haproxy":   handleHAProxyService,
 	"kubeadm":   handleKubeadmService,
 	"harvester": handleHarvesterService,
 	// "talos":     handleTalosService,
 }
 
-func getDefaultHAProxyConfig() map[string]HAProxyServiceConfig {
-	return map[string]HAProxyServiceConfig{
-		"rke2": {
-			APIPort:        6443,
-			SupervisorPort: 9345,
-		},
-		"k3s": {
-			APIPort: 6443,
-		},
-		"kubeadm": {
-			APIPort: 6443,
-		},
-	}
-}
+func handleK3sService(ctx *pulumi.Context, serviceCtx ServiceContext) error {
+	ctx.Log.Info(fmt.Sprintf("Installing K3s service on %d VMs", len(serviceCtx.VMs)), nil)
 
-func discoverKubernetesBackedns(deps map[string]interface{}) []HAProxyBackend {
-	backends := []HAProxyBackend{}
-
-	haproxyConfig, ok := deps["haproxy-config"].(map[string]HAProxyServiceConfig)
-	if !ok || haproxyConfig == nil {
-		// Fallback to defaults if not found
-		haproxyConfig = getDefaultHAProxyConfig()
+	err := installK3SLoadBalancer(ctx, serviceCtx)
+	if err != nil {
+		return fmt.Errorf("failed to install K3s load balancer: %w", err)
 	}
 
-	for service, config := range haproxyConfig {
-		depKey := fmt.Sprintf("%s-servers-ips", service)
+	if len(serviceCtx.ServiceConfig.LoadBalancer) == 0 {
+		return fmt.Errorf("k3s service requires a load balancer configured")
+	}
 
-		ips, ok := deps[depKey].([]string)
-		if !ok || len(ips) == 0 {
-			continue
+	lbName := serviceCtx.ServiceConfig.LoadBalancer[0]
+	lbKey := lbName + "-ips"
+	lbIPs, ok := serviceCtx.GlobalDeps[lbKey].([]string)
+	if !ok || len(lbIPs) == 0 {
+		return fmt.Errorf("k3s server needs loadbalancer IP but they are not available")
+	}
+
+	lbIP := lbIPs[0]
+	ctx.Log.Info(fmt.Sprintf("installing k3s server with LBIP: %s", lbIP), nil)
+
+	//var k3sCommands []*remote.Command
+	var k3sServerToken pulumi.StringOutput
+	var firstServerIP string
+	var lastServerCommand pulumi.Resource
+
+	for i, serverVM := range serviceCtx.VMs {
+		serverIP := serviceCtx.IPs[i]
+		isFirstServer := (i == 0)
+
+		ctx.Log.Info(fmt.Sprintf("Installing K3s on server %d: %s", i+1, serverIP), nil)
+
+		if isFirstServer {
+			firstServerIP = serverIP
+			ctx.Log.Info(fmt.Sprintf("installing k3s on server %d: %s", i+1, serverIP), nil)
+
+			k3sCmd, err := installK3SServer(ctx, lbIP, serviceCtx.VMPassword, serverIP, serverVM, true, pulumi.String("").ToStringOutput(), nil)
+			if err != nil {
+				return fmt.Errorf("cannot install K3s server on first node %s: %w", serverIP, err)
+			}
+			lastServerCommand = k3sCmd
+			//	k3sCommands = append(k3sCommands, k3sCmd)
+			tokenCmd, err := getK3sToken(ctx, serverIP, serviceCtx.VMPassword, k3sCmd)
+			if err != nil {
+				return fmt.Errorf("cannot get k3s token: %w", err)
+			}
+			k3sServerToken = tokenCmd.Stdout
+		} else {
+			k3sCmd, err := installK3SServer(ctx, lbIP, serviceCtx.VMPassword, serverIP, serverVM, false, k3sServerToken, nil)
+			if err != nil {
+				return fmt.Errorf("cannot install k3s on server %s: %w", serverIP, serverVM)
+			}
+			lastServerCommand = k3sCmd
+			//		k3sCommands = append(k3sCommands, k3sCmds)
 		}
-
-		// Main Kubernetes API
-		if config.APIPort > 0 {
-			backends = append(backends, HAProxyBackend{
-				Name:         fmt.Sprintf("%s-api", service),
-				IPs:          ips,
-				FrontendPort: config.APIPort,
-				BackendPort:  6443, // All K8s APIs run on 6443
-			})
-		}
-
-		// Supervisor port (for RKE2)
-		if config.SupervisorPort > 0 {
-			backends = append(backends, HAProxyBackend{
-				Name:         fmt.Sprintf("%s-supervisor", service),
-				IPs:          ips,
-				FrontendPort: config.SupervisorPort,
-				BackendPort:  config.SupervisorPort,
-			})
-		}
-
-		// Extra ports
-		for name, port := range config.ExtraPorts {
-			backends = append(backends, HAProxyBackend{
-				Name:         fmt.Sprintf("%s-%s", service, name),
-				IPs:          ips,
-				FrontendPort: port,
-				BackendPort:  port,
-			})
+	}
+	if firstServerIP != "" {
+		err := getK3sKubeconfig(ctx, firstServerIP, serviceCtx.VMPassword, lbIP, serviceCtx.VMs[0])
+		if err != nil {
+			return fmt.Errorf("failed to extract kubeconfig: %w", err)
 		}
 	}
 
-	return backends
-}
+	ctx.Log.Info(fmt.Sprintf("K3s service installed on %d servers", len(serviceCtx.VMs)), nil)
 
-func handleHAProxyService(ctx *pulumi.Context, serviceCtx ServiceContext) error {
-	ctx.Log.Info(fmt.Sprintf("Installing HAProxy service on %d VMs", len(serviceCtx.VMs)), nil)
-
-	backends := discoverKubernetesBackedns(serviceCtx.GlobalDeps)
-
-	if len(backends) == 0 {
-		ctx.Log.Info("No Kuberneres services deployd, skipping HAProxy config", nil)
+	workerNodes := serviceCtx.ServiceConfig.Workers
+	if len(workerNodes) == 0 {
+		ctx.Log.Info("No worker nodes configured for k3s", nil)
 		return nil
 	}
 
-	ctx.Log.Info(fmt.Sprintf("Found %d kubernetes backends to configure", len(backends)), nil)
-
-	for _, backend := range backends {
-		ctx.Log.Info(fmt.Sprintf("   - %s on port %d with %d servers", backend.Name, backend.FrontendPort, len(backend.IPs)), nil)
-	}
-	for i, lbVM := range serviceCtx.VMs {
-		lbIP := serviceCtx.IPs[i]
-		ctx.Log.Info(fmt.Sprintf("Installing HAProxy on %s with %d backends:", lbIP, len(backends)), nil)
-		cmd, err := installHAProxyMultiBackend(ctx, lbIP, lbVM, backends, serviceCtx.VMPassword)
-		if err != nil {
-			return fmt.Errorf("HAProxy installation failed on %s: %w", lbIP, err)
+	// Get worker VMs and IPs
+	var workerVMs []*vm.VirtualMachine
+	var workerIPs []string
+	for _, nodeName := range workerNodes {
+		vms, ok := serviceCtx.GlobalDeps[nodeName+"-vms"]
+		if !ok {
+			ctx.Log.Warn(fmt.Sprintf("Worker VMs for '%s' not found", nodeName), nil)
+			continue
 		}
-		serviceCtx.GlobalDeps["haproxy-install-command"] = cmd
-
+		ips, ok := serviceCtx.GlobalDeps[nodeName+"-ips"].([]string)
+		if !ok {
+			ctx.Log.Warn(fmt.Sprintf("Worker IPs for '%s' not found", nodeName), nil)
+			continue
+		}
+		workerVMs = append(workerVMs, vms.([]*vm.VirtualMachine)...)
+		workerIPs = append(workerIPs, ips...)
 	}
-	ctx.Log.Info("HAProxy service installed successfully", nil)
+
+	if len(workerVMs) == 0 {
+		ctx.Log.Info("No worker VMs found to join", nil)
+		return nil
+	}
+
+	ctx.Log.Info(fmt.Sprintf("Installing k3s agent on %d worker nodes", len(workerVMs)), nil)
+
+	// Install workers - they join the cluster as agents
+	for i, workerVM := range workerVMs {
+		workerIP := workerIPs[i]
+		ctx.Log.Info(fmt.Sprintf("Installing k3s agent on worker %d: %s", i+1, workerIP), nil)
+
+		_, err := installK3SWorker(ctx, lbIP, serviceCtx.VMPassword, workerIP, workerVM, lastServerCommand, k3sServerToken)
+		if err != nil {
+			return fmt.Errorf("failed to install k3s agent on worker %s: %w", workerIP, err)
+		}
+	}
+
+	ctx.Log.Info(fmt.Sprintf("k3s agents installed on %d workers", len(workerVMs)), nil)
 	return nil
 }
 
-func generateMultiBackendConfig(backends []HAProxyBackend) string {
+func installK3SLoadBalancer(ctx *pulumi.Context, serviceCtx ServiceContext) error {
+	if len(serviceCtx.ServiceConfig.LoadBalancer) == 0 {
+		ctx.Log.Info("No load balancer configured for K3s, skipping HAProxy installation", nil)
+		return nil
+	}
+
+	lbName := serviceCtx.ServiceConfig.LoadBalancer[0]
+	lbVMs, ok := serviceCtx.GlobalDeps[lbName+"-vms"]
+	if !ok {
+		return fmt.Errorf("load balancer VMs '%s' not found", lbName)
+	}
+	lbIps, ok := serviceCtx.GlobalDeps[lbName+"-ips"].([]string)
+	if !ok || len(lbIps) == 0 {
+		return fmt.Errorf("load balancer IPs '%s' not found", lbName)
+	}
+
+	lbVM := lbVMs.([]*vm.VirtualMachine)[0]
+	lbIP := lbIps[0]
+
+	backendIPs := serviceCtx.IPs
+
+	ports := serviceCtx.ServiceConfig.Config["ports"]
+	if ports == nil {
+		return fmt.Errorf("no ports configured for K3s load balancer")
+	}
+	ctx.Log.Info(fmt.Sprintf("Installing HAProxy on %s for %d K3s backends", lbIP, len(backendIPs)), nil)
+	haproxyConfig := generateK3sHAProxyConfig(backendIPs)
+
+	installScript := fmt.Sprintf(`
+	echo "Installing HAProxy on load balancer %s"
+
+# Update system (non-interactive)
+sudo DEBIAN_FRONTEND=noninteractive apt-get update -y 
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy
+
+# Backup original config
+sudo cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.bak || true
+
+# Write new configuration
+sudo tee /etc/haproxy/haproxy.cfg << 'EOF'
+%s
+EOF
+
+# Validate configuration
+if ! sudo haproxy -f /etc/haproxy/haproxy.cfg -c; then
+    echo "HAProxy configuration validation failed!"
+    exit 1
+fi
+
+# Enable and restart HAProxy
+sudo systemctl enable haproxy
+sudo systemctl restart haproxy
+
+# Show status
+sudo systemctl status haproxy --no-pager
+
+echo "HAProxy installation completed for K3S"
+`, lbIP, haproxyConfig)
+
+	_, err := remote.NewCommand(ctx, fmt.Sprintf("haproxy-install-%s", lbIP),
+		&remote.CommandArgs{
+			Connection: &remote.ConnectionArgs{
+				Host:           pulumi.String(lbIP),
+				User:           pulumi.String("rajeshk"),
+				PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+				PerDialTimeout: pulumi.IntPtr(30),
+				DialErrorLimit: pulumi.IntPtr(20),
+			},
+			Create:   pulumi.String(installScript),
+			Triggers: pulumi.Array{pulumi.String("always-run")}, // Be careful with this in prod, maybe hash the config
+		},
+		pulumi.DependsOn([]pulumi.Resource{lbVM}),
+		pulumi.Timeouts(&pulumi.CustomTimeouts{
+			Create: "10m",
+		}),
+	)
+	return err
+}
+
+func generateK3sHAProxyConfig(backendIPs []string) string {
 	var config strings.Builder
 	config.WriteString(`global
     log /dev/log local0
@@ -136,167 +231,42 @@ defaults
     timeout client  50000
     timeout server  50000
 
-`)
-
-	// Add stats endpoint
-	config.WriteString(`listen stats
+listen stats
     bind *:8404
     stats enable
     stats uri /stats
     stats refresh 30s
-    stats show-node
-    stats show-legends
 
 `)
 
-	// Generate frontend and backend for each Kubernetes service
-	for _, backend := range backends {
-		// Frontend configuration
-		config.WriteString(fmt.Sprintf(`# %s Kubernetes API Frontend
-frontend %s_frontend
-    bind *:%d
+	// K3s API backend
+	config.WriteString(`frontend k3s-api-frontend
+    bind *:6443
     mode tcp
     option tcplog
-    default_backend %s_backend
+    default_backend k3s-api-backend
 
-`, strings.ToUpper(backend.Name), backend.Name, backend.FrontendPort, backend.Name))
-
-		// Backend configuration
-		config.WriteString(fmt.Sprintf(`backend %s_backend
+backend k3s-api-backend
     mode tcp
     balance roundrobin
     option tcp-check
-`, backend.Name))
+`)
 
-		// Add each server in the backend pool
-		for i, ip := range backend.IPs {
-			config.WriteString(fmt.Sprintf("    server %s-%d %s:%d check fall 3 rise 2\n",
-				backend.Name, i+1, ip, backend.BackendPort))
-		}
-		config.WriteString("\n")
+	for i, ip := range backendIPs {
+		config.WriteString(fmt.Sprintf("    server k3s-%d %s:6443 check fall 3 rise 2\n", i+1, ip))
 	}
 
 	return config.String()
 }
-
-func installHAProxyMultiBackend(ctx *pulumi.Context, lbIP string, lbVM *vm.VirtualMachine, backends []HAProxyBackend, password string) (*remote.Command, error) {
-
-	// Generate the configuration
-	haproxyConfig := generateMultiBackendConfig(backends)
-
-	// Create a multi-line install script
-	installScript := fmt.Sprintf(`
-echo "Installing HAProxy on load balancer %s"
-
-# Update system
-sudo apt update -y 
-sudo apt install -y haproxy
-
-# Backup original config
-sudo cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.bak || true
-
-# Write new configuration
-sudo tee  /etc/haproxy/haproxy.cfg << 'EOF'
-%s
-EOF
-
-# Validate configuration
-sudo haproxy -f /etc/haproxy/haproxy.cfg -c
-
-# Enable and restart HAProxy
-sudo systemctl enable haproxy
-sudo systemctl restart haproxy
-
-# Show status
-sudo systemctl status haproxy --no-pager
-
-echo "HAProxy installation completed with %d backends configured"
-`, lbIP, haproxyConfig, len(backends))
-
-	// Deploy via remote command
-	return remote.NewCommand(ctx, fmt.Sprintf("haproxy-install-%s", lbIP),
-		&remote.CommandArgs{
-			Connection: &remote.ConnectionArgs{
-				Host:           pulumi.String(lbIP),
-				User:           pulumi.String("rajeshk"),
-				PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
-				PerDialTimeout: pulumi.IntPtr(30),
-				DialErrorLimit: pulumi.IntPtr(20),
-			},
-			Create:   pulumi.String(installScript),
-			Triggers: pulumi.Array{pulumi.String("always-run")},
-		},
-		pulumi.DependsOn([]pulumi.Resource{lbVM}),
-		pulumi.Timeouts(&pulumi.CustomTimeouts{
-			Create: "10m",
-		}),
-	)
-}
-
-func handleK3sService(ctx *pulumi.Context, serviceCtx ServiceContext) error {
-	ctx.Log.Info(fmt.Sprintf("Installing K3s service on %d VMs", len(serviceCtx.VMs)), nil)
-
-	lbIPs, ok := serviceCtx.GlobalDeps["load-balancer-ips"].([]string)
-	if !ok {
-		return fmt.Errorf("k3s server needs loadbalancer IP but they are not available")
-	}
-	lbIP := lbIPs[0]
-
-	ctx.Log.Info(fmt.Sprintf("installing k3s server with LBIP: %s", lbIP), nil)
-	//var k3sCommands []*remote.Command
-	var k3sServerToken pulumi.StringOutput
-	var firstServerIP string
-
-	for i, serverVM := range serviceCtx.VMs {
-		serverIP := serviceCtx.IPs[i]
-		isFirstServer := (i == 0)
-
-		ctx.Log.Info(fmt.Sprintf("Installing K3s on server %d: %s", i+1, serverIP), nil)
-
-		if isFirstServer {
-			firstServerIP = serverIP
-			ctx.Log.Info(fmt.Sprintf("installing k3s on server %d: %s", i+1, serverIP), nil)
-
-			k3sCmd, err := installK3SServer(ctx, lbIP, serviceCtx.VMPassword, serverIP, serverVM, true, pulumi.String("").ToStringOutput(), nil)
-			if err != nil {
-				return fmt.Errorf("cannot install K3s server on first node %s: %w", serverIP, err)
-			}
-			//	k3sCommands = append(k3sCommands, k3sCmd)
-			tokenCmd, err := getK3sToken(ctx, serverIP, serviceCtx.VMPassword, k3sCmd)
-			if err != nil {
-				return fmt.Errorf("cannot get k3s token: %w", err)
-			}
-			k3sServerToken = tokenCmd.Stdout
-		} else {
-			_, err := installK3SServer(ctx, lbIP, serviceCtx.VMPassword, serverIP, serverVM, false, k3sServerToken, nil)
-			if err != nil {
-				return fmt.Errorf("cannot install k3s on server %s: %w", serverIP, serverVM)
-			}
-			//		k3sCommands = append(k3sCommands, k3sCmds)
-		}
-	}
-	if firstServerIP != "" {
-		err := getK3sKubeconfig(ctx, firstServerIP, serviceCtx.VMPassword, lbIP, serviceCtx.VMs[0])
-		if err != nil {
-			return fmt.Errorf("failed to extract kubeconfig: %w", err)
-		}
-	}
-
-	ctx.Log.Info(fmt.Sprintf("K3s service installed on %d servers", len(serviceCtx.VMs)), nil)
-	return nil
-}
-
 func installK3SServer(ctx *pulumi.Context, lbIP, vmPassword, serverIP string, vmDependency pulumi.Resource, isFirstServer bool, k3sToken pulumi.StringOutput, haproxyDependency pulumi.Resource) (*remote.Command, error) {
 	var k3sCommand pulumi.StringInput
 
 	if isFirstServer {
 		k3sCommand = pulumi.Sprintf(`
-			sudo tee /etc/resolv.conf << 'EOF'
+			sudo bash -c "cat > /etc/resolv.conf << 'EOF'
 nameserver 192.168.90.1
-EOF
-			curl -L https://get.k3s.io | sudo sh -s - server \
-				--cluster-init --tls-san=%s --tls-san=$(hostname -I | awk '{print $1}') \
-				--write-kubeconfig-mode 644
+EOF"
+			curl -L https://get.k3s.io | sudo sh -s - server --cluster-init --tls-san=%s --tls-san=$(hostname -I | awk '{print $1}') --write-kubeconfig-mode 644
 			sudo systemctl enable --now k3s
 			sleep 100
 			sudo k3s kubectl wait --for=condition=Ready nodes --all --timeout=300s
@@ -304,9 +274,9 @@ EOF
 				`, lbIP)
 	} else {
 		k3sCommand = pulumi.Sprintf(`
-			sudo tee /etc/resolv.conf << 'EOF'
+			sudo bash -c "cat > /etc/resolv.conf << 'EOF'
 nameserver 192.168.90.1
-EOF
+EOF"
 			# Wait for first server to be ready
 			until curl -k -s https://%s:6443/ping; do
 				echo "Waiting for first K3s server to be ready..."
@@ -339,6 +309,49 @@ EOF
 		},
 		Create: k3sCommand,
 	}, pulumi.DependsOn(dependencies))
+	return cmd, err
+}
+
+// installK3SWorker installs K3s agent on worker nodes
+func installK3SWorker(ctx *pulumi.Context, lbIP, vmPassword, workerIP string, vmDependency pulumi.Resource, serverDependency pulumi.Resource, k3sToken pulumi.StringOutput) (*remote.Command, error) {
+
+	k3sCommand := pulumi.Sprintf(`
+		# Set DNS resolver
+		sudo tee /etc/resolv.conf << 'EOF'
+nameserver 192.168.90.1
+EOF
+
+		# Wait for server to be ready
+		until curl -k -s https://%s:6443/ping; do
+			echo "Waiting for K3s server to be ready..."
+			sleep 10
+		done
+
+		# Install K3s agent
+		curl -sfL https://get.k3s.io | K3S_URL=https://%s:6443 K3S_TOKEN=%s sudo sh -
+
+		echo "K3s agent joined cluster successfully"
+	`, lbIP, lbIP, k3sToken)
+
+	resourceName := fmt.Sprintf("k3s-worker-%s", strings.ReplaceAll(workerIP, ".", "-"))
+	dependencies := []pulumi.Resource{vmDependency}
+	if serverDependency != nil {
+		dependencies = append(dependencies, serverDependency)
+		ctx.Log.Info(fmt.Sprintf("K3s worker %s will wait for K3s Server installation", workerIP), nil)
+	}
+
+	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
+		Connection: &remote.ConnectionArgs{
+			Host:           pulumi.String(workerIP),
+			User:           pulumi.String("rajeshk"),
+			PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+			Password:       pulumi.String(vmPassword),
+			PerDialTimeout: pulumi.IntPtr(30),
+			DialErrorLimit: pulumi.IntPtr(20),
+		},
+		Create: k3sCommand,
+	}, pulumi.DependsOn(dependencies))
+
 	return cmd, err
 }
 
@@ -379,7 +392,7 @@ func getK3sKubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, vm
 		done
 		sleep 2
 
-		sudo cat /etc/rancher/k3s/k3s.yaml | sed 's/127.0.0.1:6443/%s:6444/g'`, lbIP) // k3s kubeconfig has frontend port to 6444 as per the
+		sudo cat /etc/rancher/k3s/k3s.yaml | sed 's/127.0.0.1:6443/%s:6443/g'`, lbIP) // k3s kubeconfig has frontend port to 6444 as per the
 
 	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
 		Connection: &remote.ConnectionArgs{
@@ -416,11 +429,25 @@ func getK3sKubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, vm
 func handleRKE2Service(ctx *pulumi.Context, serviceCtx ServiceContext) error {
 	ctx.Log.Info(fmt.Sprintf("Installing RKE2 service on %d VMs", len(serviceCtx.VMs)), nil)
 
-	lbIPs, ok := serviceCtx.GlobalDeps["load-balancer-ips"].([]string)
-	if !ok {
+	err := installRKE2LoadBalancer(ctx, serviceCtx)
+	if err != nil {
+		return fmt.Errorf("failed to install K3s load balancer: %w", err)
+	}
+
+	if len(serviceCtx.ServiceConfig.LoadBalancer) == 0 {
+		return fmt.Errorf("rke2 server needs loadbalancer IP but they are not available")
+	}
+
+	lbName := serviceCtx.ServiceConfig.LoadBalancer[0]
+	lbKey := lbName + "-ips"
+
+	lbIPs, ok := serviceCtx.GlobalDeps[lbKey].([]string)
+	if !ok || len(lbIPs) == 0 {
 		return fmt.Errorf("rke2 server needs loadbalancer IP but they are not available")
 	}
 	lbIP := lbIPs[0]
+
+	ctx.Log.Info(fmt.Sprintf("Installing RKE2 server with LB IP: %s (from %s)", lbIP, lbName), nil)
 
 	//Install Server (Control Plane)
 	controlPlaneNodes := serviceCtx.ServiceConfig.ControlPlane
@@ -536,6 +563,154 @@ func handleRKE2Service(ctx *pulumi.Context, serviceCtx ServiceContext) error {
 	ctx.Log.Info(fmt.Sprintf("RKE2 agents installed on %d workers", len(workerVMs)), nil)
 	return nil
 }
+func installRKE2LoadBalancer(ctx *pulumi.Context, serviceCtx ServiceContext) error {
+	if len(serviceCtx.ServiceConfig.LoadBalancer) == 0 {
+		ctx.Log.Info("No load balancer configured for RKE2, skipping HAProxy installation", nil)
+		return nil
+	}
+
+	lbName := serviceCtx.ServiceConfig.LoadBalancer[0]
+	lbVMs, ok := serviceCtx.GlobalDeps[lbName+"-vms"]
+	if !ok {
+		return fmt.Errorf("load balancer VMs '%s' not found", lbName)
+	}
+
+	lbIPs, ok := serviceCtx.GlobalDeps[lbName+"-ips"].([]string)
+	if !ok || len(lbIPs) == 0 {
+		return fmt.Errorf("load balancer IPs '%s' not found", lbName)
+	}
+
+	lbVM := lbVMs.([]*vm.VirtualMachine)[0]
+	lbIP := lbIPs[0]
+
+	// Get backend IPs from control plane
+	backendIPs := []string{}
+	for _, nodeName := range serviceCtx.ServiceConfig.ControlPlane {
+		if ips, ok := serviceCtx.GlobalDeps[nodeName+"-ips"].([]string); ok {
+			backendIPs = append(backendIPs, ips...)
+		}
+	}
+
+	ctx.Log.Info(fmt.Sprintf("Installing HAProxy on %s for %d RKE2 backends", lbIP, len(backendIPs)), nil)
+
+	// Generate HAProxy config for RKE2
+	haproxyConfig := generateRKE2HAProxyConfig(backendIPs)
+
+	// Install HAProxy
+	installScript := fmt.Sprintf(`
+echo "Installing HAProxy for RKE2 on %s"
+
+# Update system
+sudo DEBIAN_FRONTEND=noninteractive apt-get update -y 
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy
+
+# Backup original config
+sudo cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.bak || true
+
+# Write new configuration
+sudo tee /etc/haproxy/haproxy.cfg << 'EOF'
+%s
+EOF
+
+# Validate configuration
+if ! sudo haproxy -f /etc/haproxy/haproxy.cfg -c; then
+    echo "HAProxy configuration validation failed!"
+    exit 1
+fi
+
+# Enable and restart HAProxy
+sudo systemctl enable haproxy
+sudo systemctl restart haproxy
+
+echo "HAProxy installation completed for RKE2"
+`, lbIP, haproxyConfig)
+
+	_, err := remote.NewCommand(ctx, fmt.Sprintf("rke2-haproxy-%s", lbIP),
+		&remote.CommandArgs{
+			Connection: &remote.ConnectionArgs{
+				Host:           pulumi.String(lbIP),
+				User:           pulumi.String("rajeshk"),
+				PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+				PerDialTimeout: pulumi.IntPtr(30),
+				DialErrorLimit: pulumi.IntPtr(20),
+			},
+			Create: pulumi.String(installScript),
+		},
+		pulumi.DependsOn([]pulumi.Resource{lbVM}),
+		pulumi.Timeouts(&pulumi.CustomTimeouts{
+			Create: "10m",
+		}),
+	)
+
+	return err
+}
+func generateRKE2HAProxyConfig(backendIPs []string) string {
+	var config strings.Builder
+	config.WriteString(`global
+    log /dev/log local0
+    log /dev/log local1 notice
+    chroot /var/lib/haproxy
+    stats socket /run/haproxy/admin.sock mode 660 level admin
+    stats timeout 30s
+    user haproxy
+    group haproxy
+    daemon
+
+defaults
+    log     global
+    mode    tcp
+    option  tcplog
+    option  dontlognull
+    timeout connect 5000
+    timeout client  50000
+    timeout server  50000
+
+listen stats
+    bind *:8404
+    stats enable
+    stats uri /stats
+    stats refresh 30s
+
+`)
+
+	// RKE2 API backend (port 6443)
+	config.WriteString(`frontend rke2-api-frontend
+    bind *:6443
+    mode tcp
+    option tcplog
+    default_backend rke2-api-backend
+
+backend rke2-api-backend
+    mode tcp
+    balance roundrobin
+    option tcp-check
+`)
+
+	for i, ip := range backendIPs {
+		config.WriteString(fmt.Sprintf("    server rke2-%d %s:6443 check fall 3 rise 2\n", i+1, ip))
+	}
+
+	// RKE2 Supervisor backend (port 9345)
+	config.WriteString(`
+
+frontend rke2-supervisor-frontend
+    bind *:9345
+    mode tcp
+    option tcplog
+    default_backend rke2-supervisor-backend
+
+backend rke2-supervisor-backend
+    mode tcp
+    balance roundrobin
+    option tcp-check
+`)
+
+	for i, ip := range backendIPs {
+		config.WriteString(fmt.Sprintf("    server rke2-supervisor-%d %s:9345 check fall 3 rise 2\n", i+1, ip))
+	}
+
+	return config.String()
+}
 
 // RKE2-specific installation functions
 func installRKE2Server(ctx *pulumi.Context, lbIP, vmPassword, serverIP string, vmDependency pulumi.Resource, isFirstServer bool, rke2Token pulumi.StringOutput, haproxyDependency pulumi.Resource) (*remote.Command, error) {
@@ -631,6 +806,61 @@ EOF
 		},
 		Create: rke2Command,
 	}, pulumi.DependsOn(dependencies))
+	return cmd, err
+}
+
+func installRKE2Worker(ctx *pulumi.Context, lbIP, vmPassword, workerIP string, vmDependency pulumi.Resource, serverDependency pulumi.Resource, rke2Token pulumi.StringOutput) (*remote.Command, error) {
+
+	rke2Command := pulumi.Sprintf(`
+		# Set DNS resolver
+		sudo tee /etc/resolv.conf << 'EOF'
+nameserver 192.168.90.1
+EOF
+
+		# Wait for server to be ready
+		until curl -k -s https://%s:9345/ping; do
+			echo "Waiting for RKE2 server to be ready..."
+			sleep 10
+		done
+
+		# Create RKE2 config directory
+		sudo mkdir -p /etc/rancher/rke2
+
+		# Create RKE2 agent configuration
+		sudo tee /etc/rancher/rke2/config.yaml << 'EOF'
+server: https://%s:9345
+token: %s
+EOF
+
+		# Download and install RKE2
+		curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE="agent" sudo sh -
+
+		# Enable and start RKE2 agent
+		sudo systemctl enable rke2-agent.service
+		sudo systemctl start rke2-agent.service
+
+		echo "RKE2 agent joined cluster successfully"
+	`, lbIP, lbIP, rke2Token)
+
+	resourceName := fmt.Sprintf("rke2-worker-%s", strings.ReplaceAll(workerIP, ".", "-"))
+	dependencies := []pulumi.Resource{vmDependency}
+	if serverDependency != nil {
+		dependencies = append(dependencies, serverDependency)
+		ctx.Log.Info(fmt.Sprintf("RKE2 worker %s will wait for RKE2 Server installation", workerIP), nil)
+	}
+
+	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
+		Connection: &remote.ConnectionArgs{
+			Host:           pulumi.String(workerIP),
+			User:           pulumi.String("rajeshk"),
+			PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+			Password:       pulumi.String(vmPassword),
+			PerDialTimeout: pulumi.IntPtr(30),
+			DialErrorLimit: pulumi.IntPtr(20),
+		},
+		Create: rke2Command,
+	}, pulumi.DependsOn(dependencies))
+
 	return cmd, err
 }
 
@@ -777,107 +1007,10 @@ func handleKubeadmService(ctx *pulumi.Context, serviceCtx ServiceContext) error 
 	ctx.Log.Info("Kubeadm cluster installed successfully", nil)
 	return nil
 }
-func installRKE2Worker(ctx *pulumi.Context, lbIP, vmPassword, workerIP string, vmDependency pulumi.Resource, serverDependency pulumi.Resource, rke2Token pulumi.StringOutput) (*remote.Command, error) {
 
-	rke2Command := pulumi.Sprintf(`
-		# Set DNS resolver
-		sudo tee /etc/resolv.conf << 'EOF'
-nameserver 192.168.90.1
-EOF
-
-		# Wait for server to be ready
-		until curl -k -s https://%s:9345/ping; do
-			echo "Waiting for RKE2 server to be ready..."
-			sleep 10
-		done
-
-		# Create RKE2 config directory
-		sudo mkdir -p /etc/rancher/rke2
-
-		# Create RKE2 agent configuration
-		sudo tee /etc/rancher/rke2/config.yaml << 'EOF'
-server: https://%s:9345
-token: %s
-EOF
-
-		# Download and install RKE2
-		curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE="agent" sudo sh -
-
-		# Enable and start RKE2 agent
-		sudo systemctl enable rke2-agent.service
-		sudo systemctl start rke2-agent.service
-
-		echo "RKE2 agent joined cluster successfully"
-	`, lbIP, lbIP, rke2Token)
-
-	resourceName := fmt.Sprintf("rke2-worker-%s", strings.ReplaceAll(workerIP, ".", "-"))
-	dependencies := []pulumi.Resource{vmDependency}
-	if serverDependency != nil {
-		dependencies = append(dependencies, serverDependency)
-		ctx.Log.Info(fmt.Sprintf("RKE2 worker %s will wait for RKE2 Server installation", workerIP), nil)
-	}
-
-	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
-		Connection: &remote.ConnectionArgs{
-			Host:           pulumi.String(workerIP),
-			User:           pulumi.String("rajeshk"),
-			PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
-			Password:       pulumi.String(vmPassword),
-			PerDialTimeout: pulumi.IntPtr(30),
-			DialErrorLimit: pulumi.IntPtr(20),
-		},
-		Create: rke2Command,
-	}, pulumi.DependsOn(dependencies))
-
-	return cmd, err
-}
-
-// ========================================
 // K3S Worker Installation Function
 // ========================================
 
-// installK3SWorker installs K3s agent on worker nodes
-func installK3SWorker(ctx *pulumi.Context, lbIP, vmPassword, workerIP string, vmDependency pulumi.Resource, serverDependency pulumi.Resource, k3sToken pulumi.StringOutput) (*remote.Command, error) {
-
-	k3sCommand := pulumi.Sprintf(`
-		# Set DNS resolver
-		sudo tee /etc/resolv.conf << 'EOF'
-nameserver 192.168.90.1
-EOF
-
-		# Wait for server to be ready
-		until curl -k -s https://%s:6443/ping; do
-			echo "Waiting for K3s server to be ready..."
-			sleep 10
-		done
-
-		# Install K3s agent
-		curl -sfL https://get.k3s.io | K3S_URL=https://%s:6443 K3S_TOKEN=%s sudo sh -
-
-		echo "K3s agent joined cluster successfully"
-	`, lbIP, lbIP, k3sToken)
-
-	resourceName := fmt.Sprintf("k3s-worker-%s", strings.ReplaceAll(workerIP, ".", "-"))
-	dependencies := []pulumi.Resource{vmDependency}
-	if serverDependency != nil {
-		dependencies = append(dependencies, serverDependency)
-		ctx.Log.Info(fmt.Sprintf("K3s worker %s will wait for K3s Server installation", workerIP), nil)
-	}
-
-	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
-		Connection: &remote.ConnectionArgs{
-			Host:           pulumi.String(workerIP),
-			User:           pulumi.String("rajeshk"),
-			PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
-			Password:       pulumi.String(vmPassword),
-			PerDialTimeout: pulumi.IntPtr(30),
-			DialErrorLimit: pulumi.IntPtr(20),
-		},
-		Create: k3sCommand,
-	}, pulumi.DependsOn(dependencies))
-
-	return cmd, err
-}
 func initKubeadmControlPlane(ctx *pulumi.Context, ip string, vmResource *vm.VirtualMachine, serviceCtx ServiceContext) (pulumi.StringOutput, error) {
 	ctx.Log.Info(fmt.Sprintf("Hello From initKubeadmControlPlane on ip %s", ip), nil)
 	// Get configuration

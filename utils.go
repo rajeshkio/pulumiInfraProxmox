@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -47,30 +46,10 @@ func setupProxmoxProvider(ctx *pulumi.Context) (*proxmoxve.Provider, error) {
 	return provider, nil
 }
 
-func loadHAProxyConfig(ctx *pulumi.Context) map[string]HAProxyServiceConfig {
-	cfg := config.New(ctx, "")
-
-	var haproxyConfig map[string]HAProxyServiceConfig
-
-	configStr := cfg.Get("haproxyServices")
-	if configStr == "" {
-		return getDefaultHAProxyConfig()
-	}
-
-	if err := json.Unmarshal([]byte(configStr), &haproxyConfig); err != nil {
-		ctx.Log.Warn(fmt.Sprintf("Failed to parse haproxy config, using defaults: %v", err), nil)
-		return getDefaultHAProxyConfig()
-	}
-
-	return haproxyConfig
-}
-
 func loadConfig(ctx *pulumi.Context) (string, string, []VM, *Services, *VMCreationConfig, map[string]HAProxyServiceConfig, error) {
 	cfg := config.New(ctx, "")
 	vmPassword := cfg.Require("password")
 	gateway := cfg.Require("gateway")
-
-	haproxyConfig := loadHAProxyConfig(ctx)
 
 	var vms []VM
 	cfg.RequireObject("vms", &vms)
@@ -179,7 +158,7 @@ func loadConfig(ctx *pulumi.Context) (string, string, []VM, *Services, *VMCreati
 	if len(enabledServices) > 0 {
 		ctx.Log.Info(fmt.Sprintf("Services: Found enabled services: %v", enabledServices), nil)
 	}
-	return vmPassword, gateway, vms, &services, &vmCreationConfig, haproxyConfig, nil
+	return vmPassword, gateway, vms, &services, &vmCreationConfig, nil, nil
 }
 
 func getEnabledServices(services *Services) []string {

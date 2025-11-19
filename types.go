@@ -89,17 +89,25 @@ type VMRequest struct {
 	Password string
 }
 
+type HAProxyServiceConfig struct {
+	APIPort        int            `json:"apiPort"`
+	SupervisorPort int            `json:"supervisorPort,omitempty"`
+	DashboardPort  int            `json:"dashboardPort,omitempty"`
+	ExtraPorts     map[string]int `json:"extraPorts,omitempty"`
+}
 type HAProxyBackend struct {
 	Name         string
 	IPs          []string
 	FrontendPort int
 	BackendPort  int
 }
+type HAProxyStructure struct {
+	Config struct {
+		Ports map[string]HAProxyServiceConfig `json:"ports"`
+	} `json:"config"`
+}
 
-type HAProxyServiceConfig struct {
-	APIPort        int            `json:"apiPort"`
-	SupervisorPort int            `json:"supervisorPort,omitempty"`
-	DashboardPort  int            `json:"dashboardPort,omitempty"`
-	ExtraPorts     map[string]int `json:"extraPorts,omitempty"`
+type ServicesConfig struct {
+	HAProxy HAProxyStructure `json:"haproxy"`
 }
 type ServiceHandler func(ctx *pulumi.Context, serviceCtx ServiceContext) error

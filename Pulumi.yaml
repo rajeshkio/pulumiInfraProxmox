@@ -1,5 +1,5 @@
-name: proxmox-k3s-cluster
-description: proxmox-k3s-cluster
+name: proxmoxInfra
+description: proxmoxInfra
 runtime: go
 config:
   pulumi:tags:
