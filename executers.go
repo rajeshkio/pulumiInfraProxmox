@@ -24,8 +24,6 @@ func executeService(ctx *pulumi.Context, serviceName string, config *ServiceConf
 	allTargets := []string{}
 	allTargets = append(allTargets, config.Targets...)
 	allTargets = append(allTargets, config.ControlPlane...)
-	allTargets = append(allTargets, config.Workers...)
-	allTargets = append(allTargets, config.LoadBalancer...)
 
 	for _, target := range allTargets {
 		if vms, exists := vmGroups[target]; exists {
@@ -42,12 +40,6 @@ func executeService(ctx *pulumi.Context, serviceName string, config *ServiceConf
 	return handler(ctx, serviceCtx)
 }
 func executeServices(ctx *pulumi.Context, services *Services, vmGroups map[string][]*vm.VirtualMachine, globalDeps map[string]interface{}, vmPassword string) error {
-	if services.HAProxy != nil && services.HAProxy.Enabled {
-		err := executeService(ctx, "haproxy", services.HAProxy, vmGroups, globalDeps, vmPassword)
-		if err != nil {
-			return fmt.Errorf("failed to execute HAProxy service: %w", err)
-		}
-	}
 	if services.K3s != nil && services.K3s.Enabled {
 		err := executeService(ctx, "k3s", services.K3s, vmGroups, globalDeps, vmPassword)
 		if err != nil {
@@ -64,12 +56,6 @@ func executeServices(ctx *pulumi.Context, services *Services, vmGroups map[strin
 		err := executeService(ctx, "kubeadm", services.Kubeadm, vmGroups, globalDeps, vmPassword)
 		if err != nil {
 			return fmt.Errorf("failed to execute Kubeadm service: %w", err)
-		}
-	}
-	if services.Harvester != nil && services.Harvester.Enabled {
-		err := executeService(ctx, "harvester", services.Harvester, vmGroups, globalDeps, vmPassword)
-		if err != nil {
-			return fmt.Errorf("failed to execute Harvester service: %w", err)
 		}
 	}
 	return nil

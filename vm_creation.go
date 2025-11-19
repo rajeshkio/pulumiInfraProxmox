@@ -256,13 +256,6 @@ func createIPXEVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int
 			Update: "30m",
 			Delete: "10m",
 		}))
-	} else {
-		// Join nodes need more time as they wait for create node
-		opts = append(opts, pulumi.Timeouts(&pulumi.CustomTimeouts{
-			Create: "45m",
-			Update: "45m",
-			Delete: "10m",
-		}))
 	}
 
 	// Add dependencies if provided
