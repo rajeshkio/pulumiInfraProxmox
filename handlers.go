@@ -16,7 +16,7 @@ var serviceHandlers = map[string]ServiceHandler{
 	"rke2":      handleRKE2Service,
 	"kubeadm":   handleKubeadmService,
 	"harvester": handleHarvesterService,
-	// "talos":     handleTalosService,
+	//"talos":     handleTalosService,
 }
 
 func handleK3sService(ctx *pulumi.Context, serviceCtx ServiceContext) error {
@@ -264,8 +264,9 @@ func installK3SServer(ctx *pulumi.Context, lbIP, vmPassword, serverIP string, vm
 	if isFirstServer {
 		k3sCommand = pulumi.Sprintf(`
 			sudo bash -c "cat > /etc/resolv.conf << 'EOF'
-nameserver 192.168.90.1
+nameserver 192.168.90.152
 EOF"
+			sudo SUSEConnect --url=https://scc.suse.com -e rajesh.kumar@suse.com -r INTERNAL-USE-ONLY-5364-be7d ## DO NOT COMMIT.. REMEMBER TO REMOVE 
 			curl -L https://get.k3s.io | sudo sh -s - server --cluster-init --tls-san=%s --tls-san=$(hostname -I | awk '{print $1}') --write-kubeconfig-mode 644
 			sudo systemctl enable --now k3s
 			sleep 100
@@ -275,8 +276,9 @@ EOF"
 	} else {
 		k3sCommand = pulumi.Sprintf(`
 			sudo bash -c "cat > /etc/resolv.conf << 'EOF'
-nameserver 192.168.90.1
+nameserver 192.168.90.152
 EOF"
+			sudo SUSEConnect --url=https://scc.suse.com -e rajesh.kumar@suse.com -r INTERNAL-USE-ONLY-5364-be7d ## DO NOT COMMIT.. REMEMBER TO REMOVE
 			# Wait for first server to be ready
 			until curl -k -s https://%s:6443/ping; do
 				echo "Waiting for first K3s server to be ready..."
@@ -318,7 +320,7 @@ func installK3SWorker(ctx *pulumi.Context, lbIP, vmPassword, workerIP string, vm
 	k3sCommand := pulumi.Sprintf(`
 		# Set DNS resolver
 		sudo tee /etc/resolv.conf << 'EOF'
-nameserver 192.168.90.1
+nameserver 192.168.90.152
 EOF
 
 		# Wait for server to be ready
@@ -721,7 +723,7 @@ func installRKE2Server(ctx *pulumi.Context, lbIP, vmPassword, serverIP string, v
 		rke2Command = pulumi.Sprintf(`
 			# Set DNS resolver
 			sudo tee /etc/resolv.conf << 'EOF'
-nameserver 192.168.90.1
+nameserver 192.168.90.152
 EOF
 
 			# Create RKE2 config directory
@@ -755,7 +757,7 @@ EOF
 		rke2Command = pulumi.Sprintf(`
 			# Set DNS resolver
 			sudo tee /etc/resolv.conf << 'EOF'
-nameserver 192.168.90.1
+nameserver 192.168.90.152
 EOF
 
 			# Wait for first server to be ready
@@ -814,7 +816,7 @@ func installRKE2Worker(ctx *pulumi.Context, lbIP, vmPassword, workerIP string, v
 	rke2Command := pulumi.Sprintf(`
 		# Set DNS resolver
 		sudo tee /etc/resolv.conf << 'EOF'
-nameserver 192.168.90.1
+nameserver 192.168.90.152
 EOF
 
 		# Wait for server to be ready
@@ -934,8 +936,157 @@ func getRKE2Kubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, v
 	return nil
 }
 
+func installKubeadmLoadBalancer(ctx *pulumi.Context, serviceCtx ServiceContext) error {
+	if len(serviceCtx.ServiceConfig.LoadBalancer) == 0 {
+		ctx.Log.Info("No load balancer configured for Kubeadm, skipping HAProxy installation", nil)
+		return nil
+	}
+
+	lbName := serviceCtx.ServiceConfig.LoadBalancer[0]
+	lbVMs, ok := serviceCtx.GlobalDeps[lbName+"-vms"]
+	if !ok {
+		return fmt.Errorf("load balancer VMs '%s' not found", lbName)
+	}
+
+	lbIPs, ok := serviceCtx.GlobalDeps[lbName+"-ips"].([]string)
+	if !ok || len(lbIPs) == 0 {
+		return fmt.Errorf("load balancer IPs '%s' not found", lbName)
+	}
+
+	lbVM := lbVMs.([]*vm.VirtualMachine)[0]
+	lbIP := lbIPs[0]
+
+	// Get backend IPs from control plane
+	backendIPs := []string{}
+	for _, nodeName := range serviceCtx.ServiceConfig.ControlPlane {
+		if ips, ok := serviceCtx.GlobalDeps[nodeName+"-ips"].([]string); ok {
+			backendIPs = append(backendIPs, ips...)
+		}
+	}
+
+	ctx.Log.Info(fmt.Sprintf("Installing HAProxy on %s for %d Kubeadm backends", lbIP, len(backendIPs)), nil)
+
+	haproxyConfig := generateKubeadmHAProxyConfig(backendIPs)
+
+	installScript := fmt.Sprintf(`
+echo "Installing HAProxy for Kubeadm on %s"
+
+# Update system
+sudo DEBIAN_FRONTEND=noninteractive apt-get update -y 
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy
+
+# Backup original config
+sudo cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.bak || true
+
+# Write new configuration
+sudo tee /etc/haproxy/haproxy.cfg << 'EOF'
+%s
+EOF
+
+# Validate configuration
+if ! sudo haproxy -f /etc/haproxy/haproxy.cfg -c; then
+    echo "HAProxy configuration validation failed!"
+    exit 1
+fi
+
+# Enable and restart HAProxy
+sudo systemctl enable haproxy
+sudo systemctl restart haproxy
+
+echo "HAProxy installation completed for Kubeadm"
+`, lbIP, haproxyConfig)
+
+	_, err := remote.NewCommand(ctx, fmt.Sprintf("kubeadm-haproxy-%s", lbIP),
+		&remote.CommandArgs{
+			Connection: &remote.ConnectionArgs{
+				Host:           pulumi.String(lbIP),
+				User:           pulumi.String("rajeshk"),
+				PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+				PerDialTimeout: pulumi.IntPtr(30),
+				DialErrorLimit: pulumi.IntPtr(20),
+			},
+			Create: pulumi.String(installScript),
+		},
+		pulumi.DependsOn([]pulumi.Resource{lbVM}),
+		pulumi.Timeouts(&pulumi.CustomTimeouts{
+			Create: "10m",
+		}),
+	)
+
+	return err
+}
+
+func generateKubeadmHAProxyConfig(backendIPs []string) string {
+	var config strings.Builder
+	config.WriteString(`global
+    log /dev/log local0
+    log /dev/log local1 notice
+    chroot /var/lib/haproxy
+    stats socket /run/haproxy/admin.sock mode 660 level admin
+    stats timeout 30s
+    user haproxy
+    group haproxy
+    daemon
+
+defaults
+    log     global
+    mode    tcp
+    option  tcplog
+    option  dontlognull
+    timeout connect 5000
+    timeout client  50000
+    timeout server  50000
+
+listen stats
+    bind *:8404
+    stats enable
+    stats uri /stats
+    stats refresh 30s
+
+`)
+
+	// Kubeadm API backend (port 6443 only, no supervisor port needed)
+	config.WriteString(`frontend kubeadm-api-frontend
+    bind *:6443
+    mode tcp
+    option tcplog
+    default_backend kubeadm-api-backend
+
+backend kubeadm-api-backend
+    mode tcp
+    balance roundrobin
+    option tcp-check
+`)
+
+	for i, ip := range backendIPs {
+		config.WriteString(fmt.Sprintf("    server kubeadm-%d %s:6443 check fall 3 rise 2\n", i+1, ip))
+	}
+
+	return config.String()
+}
+
 func handleKubeadmService(ctx *pulumi.Context, serviceCtx ServiceContext) error {
 	ctx.Log.Info("Installing Kubeadm Kubernetes cluster", nil)
+
+	err := installKubeadmLoadBalancer(ctx, serviceCtx)
+	if err != nil {
+		return fmt.Errorf("failed to install Kubeadm load balancer: %w", err)
+	}
+
+	// Get load balancer IP
+	if len(serviceCtx.ServiceConfig.LoadBalancer) == 0 {
+		return fmt.Errorf("kubeadm service requires a load balancer configured")
+	}
+
+	lbName := serviceCtx.ServiceConfig.LoadBalancer[0]
+	lbKey := lbName + "-ips"
+	lbIPs, ok := serviceCtx.GlobalDeps[lbKey].([]string)
+	if !ok || len(lbIPs) == 0 {
+		return fmt.Errorf("kubeadm server needs loadbalancer IP but they are not available")
+	}
+	lbIP := lbIPs[0]
+
+	ctx.Log.Info(fmt.Sprintf("Installing Kubeadm with LB IP: %s", lbIP), nil)
 
 	controlPlaneNodes := serviceCtx.ServiceConfig.ControlPlane
 	if len(controlPlaneNodes) == 0 {
@@ -965,7 +1116,7 @@ func handleKubeadmService(ctx *pulumi.Context, serviceCtx ServiceContext) error 
 	firstControlPlaneVM := controlPlaneVMs[0]
 
 	ctx.Log.Info(fmt.Sprintf("Initializing first control plane node: %s", firstControlPlaneIP), nil)
-	joinCommand, err := initKubeadmControlPlane(ctx, firstControlPlaneIP, firstControlPlaneVM, serviceCtx)
+	joinCommand, err := initKubeadmControlPlane(ctx, firstControlPlaneIP, lbIP, firstControlPlaneVM, serviceCtx)
 	if err != nil {
 		return fmt.Errorf("failed to initialize control plane: %w", err)
 	}
@@ -976,6 +1127,14 @@ func handleKubeadmService(ctx *pulumi.Context, serviceCtx ServiceContext) error 
 		err := joinKubeadmControlPlane(ctx, controlPlaneIPs[i], controlPlaneVMs[i], joinCommand, serviceCtx)
 		if err != nil {
 			return fmt.Errorf("failed to join control plane node %s: %w", controlPlaneIPs[i], err)
+		}
+	}
+
+	// Export kubeconfig from first server
+	if firstControlPlaneIP != "" {
+		err := getKubeadmKubeconfig(ctx, firstControlPlaneIP, serviceCtx.VMPassword, lbIP, controlPlaneVMs[0])
+		if err != nil {
+			return fmt.Errorf("failed to extract kubeadm kubeconfig: %w", err)
 		}
 	}
 
@@ -1011,7 +1170,7 @@ func handleKubeadmService(ctx *pulumi.Context, serviceCtx ServiceContext) error 
 // K3S Worker Installation Function
 // ========================================
 
-func initKubeadmControlPlane(ctx *pulumi.Context, ip string, vmResource *vm.VirtualMachine, serviceCtx ServiceContext) (pulumi.StringOutput, error) {
+func initKubeadmControlPlane(ctx *pulumi.Context, ip string, lbIP string, vmResource *vm.VirtualMachine, serviceCtx ServiceContext) (pulumi.StringOutput, error) {
 	ctx.Log.Info(fmt.Sprintf("Hello From initKubeadmControlPlane on ip %s", ip), nil)
 	// Get configuration
 	config := serviceCtx.ServiceConfig.Config
@@ -1020,76 +1179,104 @@ func initKubeadmControlPlane(ctx *pulumi.Context, ip string, vmResource *vm.Virt
 
 	// Installation script
 	installScript := fmt.Sprintf(`#!/bin/bash
-set -e
+	set -e
+	set -x
+
+	# Wait for apt locks
+wait_for_apt() {
+    while sudo fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || \
+          sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+          sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
+        echo "Waiting for apt locks..."
+        sleep 5
+    done
+}
 
 # Disable swap
-swapoff -a
-sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+sudo swapoff -a
+sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
 
 # Enable IP forwarding and bridging
-cat <<EOF | tee /etc/modules-load.d/k8s.conf
+sudo tee /etc/modules-load.d/k8s.conf <<EOF
 overlay
 br_netfilter
 EOF
 
-modprobe overlay
-modprobe br_netfilter
+sudo modprobe overlay
+sudo modprobe br_netfilter
 
-cat <<EOF | tee /etc/sysctl.d/k8s.conf
+sudo tee /etc/sysctl.d/k8s.conf <<EOF
 net.bridge.bridge-nf-call-iptables  = 1
 net.bridge.bridge-nf-call-ip6tables = 1
 net.ipv4.ip_forward                 = 1
 EOF
 
-sysctl --system
+sudo sysctl --system
 
 # Install containerd
-apt-get update
-apt-get install -y containerd
+wait_for_apt
+sudo apt-get update && sudo apt-get install -y containerd
 
 # Configure containerd
-mkdir -p /etc/containerd
-containerd config default | tee /etc/containerd/config.toml
-sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
-systemctl restart containerd
-systemctl enable containerd
+sudo mkdir -p /etc/containerd
+sudo containerd config default | sudo tee /etc/containerd/config.toml
+sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+sudo systemctl restart containerd
+sudo systemctl enable containerd
 
 # Install kubeadm, kubelet, kubectl
-apt-get update
-apt-get install -y apt-transport-https ca-certificates curl gpg
+wait_for_apt
+sudo apt-get install -y apt-transport-https ca-certificates curl gpg
 
-mkdir -p -m 755 /etc/apt/keyrings
-curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+sudo mkdir -p -m 755 /etc/apt/keyrings
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 
-echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /' | tee /etc/apt/sources.list.d/kubernetes.list
+echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+wait_for_apt
+sudo apt-get update && sudo apt-get install -y kubelet kubeadm kubectl && sudo apt-mark hold kubelet kubeadm kubectl
 
-apt-get update
-apt-get install -y kubelet kubeadm kubectl
-apt-mark hold kubelet kubeadm kubectl
+sudo systemctl enable kubelet
 
-systemctl enable kubelet
+# Install Helm
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash
 
 # Initialize control plane
-kubeadm init \
+sudo kubeadm init \
   --pod-network-cidr=%s \
   --service-cidr=%s \
   --apiserver-advertise-address=%s \
   --control-plane-endpoint=%s:6443 \
-  --upload-certs
+  --upload-certs \
+  --skip-phases=addon/kube-proxy
 
 # Set up kubeconfig
 mkdir -p $HOME/.kube
-cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
-chown $(id -u):$(id -g) $HOME/.kube/config
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
 
-# Install Calico CNI
-kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/calico.yaml
 
-# Generate join command and save it
-kubeadm token create --print-join-command > /tmp/kubeadm-join-command.txt
+# Install Cilium CNI
+helm repo add cilium https://helm.cilium.io/
+helm repo update
+
+API_SERVER_IP=%s
+API_SERVER_PORT=6443
+
+helm install cilium cilium/cilium --version 1.18.4 \
+    --namespace kube-system \
+    --set kubeProxyReplacement=true \
+    --set k8sServiceHost=${API_SERVER_IP} \
+    --set k8sServicePort=${API_SERVER_PORT}
+
+# Upload certificates and get the certificate key
+CERT_KEY=$(sudo kubeadm init phase upload-certs --upload-certs 2>/dev/null | tail -1)
+
+# Generate join command with certificate key
+JOIN_CMD=$(sudo kubeadm token create --print-join-command)
+echo "$JOIN_CMD --certificate-key $CERT_KEY --control-plane" | sudo tee /tmp/kubeadm-join-command.txt
 
 echo "Control plane initialized successfully"
-`, podCIDR, serviceCIDR, ip, ip)
+`, podCIDR, serviceCIDR, ip, lbIP, ip)
 
 	connection := &remote.ConnectionArgs{
 		Host:       pulumi.String(ip),
@@ -1122,50 +1309,50 @@ echo "Control plane initialized successfully"
 func joinKubeadmControlPlane(ctx *pulumi.Context, ip string, vmResource *vm.VirtualMachine, joinCommand pulumi.StringOutput, serviceCtx ServiceContext) error {
 	joinScript := joinCommand.ApplyT(func(cmd string) string {
 		return fmt.Sprintf(`#!/bin/bash
-set -e
-
+	set -e
+	set -x
 # Same prerequisites as control plane
-swapoff -a
-sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+sudo swapoff -a
+sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
 
-cat <<EOF | tee /etc/modules-load.d/k8s.conf
+sudo tee /etc/modules-load.d/k8s.conf <<EOF
 overlay
 br_netfilter
 EOF
 
-modprobe overlay
-modprobe br_netfilter
+sudo modprobe overlay
+sudo modprobe br_netfilter
 
-cat <<EOF | tee /etc/sysctl.d/k8s.conf
+sudo tee /etc/sysctl.d/k8s.conf <<EOF
 net.bridge.bridge-nf-call-iptables  = 1
 net.bridge.bridge-nf-call-ip6tables = 1
 net.ipv4.ip_forward                 = 1
 EOF
 
-sysctl --system
+sudo sysctl --system
 
 # Install containerd
-apt-get update
-apt-get install -y containerd
-mkdir -p /etc/containerd
-containerd config default | tee /etc/containerd/config.toml
-sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
-systemctl restart containerd
-systemctl enable containerd
+sudo apt-get update && sudo apt-get install -y containerd
+sudo mkdir -p /etc/containerd
+sudo containerd config default | sudo tee /etc/containerd/config.toml
+sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+sudo systemctl restart containerd
+sudo systemctl enable containerd
 
 # Install kubeadm, kubelet, kubectl
-apt-get install -y apt-transport-https ca-certificates curl gpg
-mkdir -p -m 755 /etc/apt/keyrings
-curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /' | tee /etc/apt/sources.list.d/kubernetes.list
-apt-get update
-apt-get install -y kubelet kubeadm kubectl
-apt-mark hold kubelet kubeadm kubectl
-systemctl enable kubelet
+sudo apt-get install -y apt-transport-https ca-certificates curl gpg
+sudo mkdir -p -m 755 /etc/apt/keyrings
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+sudo apt-get update
+sudo apt-get install -y kubelet kubeadm kubectl
+sudo apt-mark hold kubelet kubeadm kubectl
+sudo systemctl enable kubelet
 
 # Join as control plane
-%s --control-plane
-`, cmd)
+echo "sudo %s"
+sudo %s
+`, cmd, cmd)
 	}).(pulumi.StringOutput)
 
 	connection := &remote.ConnectionArgs{
@@ -1247,6 +1434,49 @@ systemctl enable kubelet
 	}, pulumi.DependsOn([]pulumi.Resource{vmResource}))
 
 	return err
+}
+
+func getKubeadmKubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, vmDependency pulumi.Resource) error {
+	resourceName := fmt.Sprintf("kubeadm-kubeconfig-%s", strings.ReplaceAll(serverIP, ".", "-"))
+
+	kubeconfigCommand := fmt.Sprintf(`
+	  while [ ! -f /etc/kubernetes/admin.conf ]; do
+	    echo "Waiting for kubeadm kubeconfig..." >&2
+		sleep 5
+	  done
+	  sleep 2
+	  sudo cat /etc/kubernetes/admin.conf | sed 's/127.0.0.1:6443/%s:6443/g'`, lbIP)
+
+	cmd, err := remote.NewCommand(ctx, resourceName, &remote.CommandArgs{
+		Connection: &remote.ConnectionArgs{
+			Host:           pulumi.String(serverIP),
+			User:           pulumi.String("rajeshk"),
+			PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+			Password:       pulumi.String(vmPassword),
+			PerDialTimeout: pulumi.IntPtr(30),
+			DialErrorLimit: pulumi.IntPtr(20),
+		},
+		Create: pulumi.String(kubeconfigCommand),
+	}, pulumi.DependsOn([]pulumi.Resource{vmDependency}))
+
+	if err != nil {
+		return err
+	}
+	kubeconfigPath := "./kubeadm-kubeconfig.yaml"
+	_, err = local.NewFile(ctx, "save-kubeadm-kubeconfig", &local.FileArgs{
+		Filename: pulumi.String(kubeconfigPath),
+		Content:  cmd.Stdout,
+	}, pulumi.DependsOn([]pulumi.Resource{cmd}),
+		pulumi.ReplaceOnChanges([]string{"content"}))
+
+	if err != nil {
+		return fmt.Errorf("failed to save kubeadm kubeconfig locally: %w", err)
+	}
+	ctx.Export("kubeadm-kubeconfig", cmd.Stdout)
+	ctx.Export("kubeadm-kubeconfigPath", pulumi.String(kubeconfigPath))
+	ctx.Log.Info("Kubeadm kubeconfig exported successfully", nil)
+	return nil
+
 }
 
 // Helper function to get config values with defaults

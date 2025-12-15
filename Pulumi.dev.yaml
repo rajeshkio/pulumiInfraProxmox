@@ -1,12 +1,6 @@
 config:
-  proxmox-k3s-cluster:features:
-    loadbalancer: false
-    k3s: false
-    harvester: true
-  proxmox-k3s-cluster:password:
-    secure: AAABAGp/DPzUwE0pABKqUnBiKh3vynSA5B9txL5JQdoEgJFSKZHgWQ==
-  proxmox-k3s-cluster:gateway: 192.168.90.1
-  proxmox-k3s-cluster:vmCreation:
+  proxmoxInfra:gateway: 192.168.90.1
+  proxmoxInfra:vmCreation:
     maxRetries: 5 # Retry attempts per VM (default: 5)
   # ========================================
   # INFRASTRUCTURE LAYER - Virtual Machines
@@ -25,7 +19,7 @@ config:
     bootMethod: cloud-init
   proxmoxInfra:k8s-cp-template: &k8s-cp
     count: 3
-    templateId: 9001 # SLE Micro template
+    templateId: 9003 # SLE Micro template
     cpu: 4
     memory: 4000
     diskSize: 50
@@ -62,6 +56,9 @@ config:
     - <<: *k8s-cp
       name: "k3s-servers"
       ips: ["192.168.90.180", "192.168.90.181", "192.168.90.182"]
+      cpu: 8
+      memory: 16000
+      diskSize: 150
 
     - <<: *k8s-worker
       name: "k3s-workers"
@@ -73,11 +70,14 @@ config:
       name: "rke2-lb"
       ips: ["192.168.90.201"]
       templateId: 9002
+      proxmoxNode: proxmox-3
 
     - <<: *k8s-cp
       name: "rke2-servers"
       ips: ["192.168.90.210", "192.168.90.211", "192.168.90.212"]
       templateId: 9001
+      count: 0
+      proxmoxNode: proxmox-3
 
     - <<: *k8s-worker
       name: "rke2-workers"
@@ -88,14 +88,15 @@ config:
     # Kubeadm Infrastructure
     - <<: *lb-vm
       name: "kubeadm-lb"
-      count: 0
+      count: 1
       ips: ["192.168.90.202"]
 
     - <<: *k8s-cp
       name: "kubeadm-servers"
-      count: 0
+      count: 3
       templateId: 9000 # Override template (Ubuntu not SLE Micro)
       ips: ["192.168.90.230", "192.168.90.231", "192.168.90.232"]
+      proxmoxNode: proxmox-1
 
     - <<: *k8s-worker
       name: "kubeadm-workers"
@@ -105,12 +106,11 @@ config:
 
     # Harvester
     - name: "harvester-nodes"
-      count: 3
+      count: 1
       bootMethod: "ipxe"
       ipxeConfig:
         isoFiles:
-          - "harvester-create-v1.4.3.iso"
-          - "harvester-join-v1.4.3.iso"
+          - "harvester-create-v1.5.2.iso"
       memory: 40000
       cpu: 12
       diskSize: 300
@@ -132,7 +132,7 @@ config:
             frontend: 6443
             name: api
     rke2:
-      enabled: true
+      enabled: false
       loadBalancer: ["rke2-lb"]
       controlPlane: ["rke2-servers"]
       workers: ["rke2-workers"]
@@ -147,13 +147,14 @@ config:
             name: supervisor
     # Kubeadm (not yet implemented)
     kubeadm:
-      enabled: false
+      enabled: true 
       loadBalancer: ["kubeadm-lb"]
       controlPlane: ["kubeadm-servers"]
       workers: []
       config:
         pod-cidr: "10.244.0.0/16"
         service-cidr: "10.96.0.0/12"
+
     # Talos Linux (not yet implemented)
     talos:
       enabled: false

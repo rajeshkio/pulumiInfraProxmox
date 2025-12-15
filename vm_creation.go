@@ -163,8 +163,7 @@ func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 			Dns: &vm.VirtualMachineInitializationDnsArgs{
 				Domain: pulumi.String("local"),
 				Servers: pulumi.StringArray{
-					pulumi.String("192.168.90.1"),
-					pulumi.String("8.8.8.8"),
+					pulumi.String("192.168.90.152"),
 				},
 			},
 			IpConfigs: ipConfig,
