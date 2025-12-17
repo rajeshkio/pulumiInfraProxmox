@@ -57,7 +57,7 @@ config:
       name: "k3s-servers"
       ips: ["192.168.90.180", "192.168.90.181", "192.168.90.182"]
       cpu: 8
-      memory: 16000
+      memory: 8000
       diskSize: 150
 
     - <<: *k8s-worker
@@ -76,7 +76,8 @@ config:
       name: "rke2-servers"
       ips: ["192.168.90.210", "192.168.90.211", "192.168.90.212"]
       templateId: 9001
-      count: 0
+      cpu: 8
+      memory: 8000
       proxmoxNode: proxmox-3
 
     - <<: *k8s-worker
@@ -96,6 +97,8 @@ config:
       count: 3
       templateId: 9000 # Override template (Ubuntu not SLE Micro)
       ips: ["192.168.90.230", "192.168.90.231", "192.168.90.232"]
+      cpu: 8
+      memory: 8000
       proxmoxNode: proxmox-1
 
     - <<: *k8s-worker
@@ -113,7 +116,7 @@ config:
           - "harvester-create-v1.5.2.iso"
       memory: 40000
       cpu: 12
-      diskSize: 300
+      diskSize: 350
   # ========================================
   # SERVICES LAYER - What runs on those VMs
   # ========================================
@@ -123,7 +126,7 @@ config:
       enabled: true
       loadBalancer: ["k3s-lb"]
       controlPlane: ["k3s-servers"]
-      workers: ["k3s-workers"]
+      workers: []
       config:
         cluster-init: true
         tls-san-loadbalancer: true
@@ -132,10 +135,10 @@ config:
             frontend: 6443
             name: api
     rke2:
-      enabled: false
+      enabled: true
       loadBalancer: ["rke2-lb"]
       controlPlane: ["rke2-servers"]
-      workers: ["rke2-workers"]
+      workers: []
       config:
         cluster-init: true
         ports:
@@ -147,7 +150,7 @@ config:
             name: supervisor
     # Kubeadm (not yet implemented)
     kubeadm:
-      enabled: true 
+      enabled: false
       loadBalancer: ["kubeadm-lb"]
       controlPlane: ["kubeadm-servers"]
       workers: []

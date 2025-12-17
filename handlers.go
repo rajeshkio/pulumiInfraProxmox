@@ -261,38 +261,115 @@ backend k3s-api-backend
 func installK3SServer(ctx *pulumi.Context, lbIP, vmPassword, serverIP string, vmDependency pulumi.Resource, isFirstServer bool, k3sToken pulumi.StringOutput, haproxyDependency pulumi.Resource) (*remote.Command, error) {
 	var k3sCommand pulumi.StringInput
 
+	suseEmail := os.Getenv("SUSE_REGISTRATION_EMAIL")
+	suseCode := os.Getenv("SUSE_REGISTRATION_CODE")
+
+	suseRegCmd := ""
+	if suseEmail != "" && suseCode != "" {
+		suseRegCmd = fmt.Sprintf("sudo SUSEConnect --url=https://scc.suse.com -e %s -r %s", suseEmail, suseCode)
+	}
+
 	if isFirstServer {
 		k3sCommand = pulumi.Sprintf(`
-			sudo bash -c "cat > /etc/resolv.conf << 'EOF'
+		sudo bash -c "cat > /etc/resolv.conf << 'EOF'
 nameserver 192.168.90.152
 EOF"
-			sudo SUSEConnect --url=https://scc.suse.com -e rajesh.kumar@suse.com -r INTERNAL-USE-ONLY-5364-be7d ## DO NOT COMMIT.. REMEMBER TO REMOVE 
-			curl -L https://get.k3s.io | sudo sh -s - server --cluster-init --tls-san=%s --tls-san=$(hostname -I | awk '{print $1}') --write-kubeconfig-mode 644
-			sudo systemctl enable --now k3s
-			sleep 100
-			sudo k3s kubectl wait --for=condition=Ready nodes --all --timeout=300s
-			sudo ls /var/lib/rancher/k3s/server/node-token
-				`, lbIP)
+		%s 
+		
+		# Install K3s with CNI disabled
+		curl -L https://get.k3s.io | sudo sh -s - server \
+			--cluster-init \
+			--tls-san=%s \
+			--tls-san=$(hostname -I | awk '{print $1}') \
+			--write-kubeconfig-mode 644 \
+			--flannel-backend=none \
+			--disable-kube-proxy \
+			--disable=traefik \
+			--disable=servicelb
+		
+		sudo systemctl enable --now k3s
+		
+		# Wait for kubeconfig file and API endpoint
+		echo "Waiting for K3s kubeconfig..."
+		until sudo test -f /etc/rancher/k3s/k3s.yaml; do
+			sleep 2
+		done
+		
+		# Wait for API server to respond (ignore node status)
+		echo "Waiting for K3s API server..."
+		until sudo /usr/local/bin/k3s kubectl get --raw /healthz >/dev/null 2>&1; do
+			sleep 5
+		done
+		
+		# Install Helm
+		curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash
+		
+		# Set kubeconfig for helm
+		export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+		
+		# Install Cilium CNI
+		helm repo add cilium https://helm.cilium.io/
+		helm repo update
+		
+		API_SERVER_IP=%s
+		API_SERVER_PORT=6443
+		
+		KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm install cilium cilium/cilium \
+			--namespace kube-system \
+			--set kubeProxyReplacement=true \
+			--set k8sServiceHost=${API_SERVER_IP} \
+			--set k8sServicePort=${API_SERVER_PORT} \
+			--set hubble.relay.enabled=true
+		
+		# Install cilium CLI
+		CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
+		CLI_ARCH=amd64
+		if [ "$(uname -m)" = "aarch64" ]; then CLI_ARCH=arm64; fi
+		curl -L --fail --remote-name-all https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
+		sha256sum --check cilium-linux-${CLI_ARCH}.tar.gz.sha256sum
+		sudo tar xzvfC cilium-linux-${CLI_ARCH}.tar.gz /usr/local/bin
+		rm cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
+		
+		# Install hubble CLI
+		HUBBLE_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/hubble/master/stable.txt)
+		HUBBLE_ARCH=amd64
+		if [ "$(uname -m)" = "aarch64" ]; then HUBBLE_ARCH=arm64; fi
+		curl -L --fail --remote-name-all https://github.com/cilium/hubble/releases/download/$HUBBLE_VERSION/hubble-linux-${HUBBLE_ARCH}.tar.gz{,.sha256sum}
+		sha256sum --check hubble-linux-${HUBBLE_ARCH}.tar.gz.sha256sum
+		sudo tar xzvfC hubble-linux-${HUBBLE_ARCH}.tar.gz /usr/local/bin
+		rm hubble-linux-${HUBBLE_ARCH}.tar.gz{,.sha256sum}
+		
+		# Now wait for nodes to be ready
+		echo "Waiting for nodes to be ready..."
+		sudo k3s kubectl wait --for=condition=Ready nodes --all --timeout=300s
+		
+		sudo ls /var/lib/rancher/k3s/server/node-token
+	`, suseRegCmd, lbIP, serverIP)
 	} else {
 		k3sCommand = pulumi.Sprintf(`
 			sudo bash -c "cat > /etc/resolv.conf << 'EOF'
 nameserver 192.168.90.152
 EOF"
-			sudo SUSEConnect --url=https://scc.suse.com -e rajesh.kumar@suse.com -r INTERNAL-USE-ONLY-5364-be7d ## DO NOT COMMIT.. REMEMBER TO REMOVE
+			%s
 			# Wait for first server to be ready
 			until curl -k -s https://%s:6443/ping; do
 				echo "Waiting for first K3s server to be ready..."
 				sleep 10
 			done
 			
+			# Install K3s with CNI disabled
 			curl -sfL https://get.k3s.io | sudo sh -s - server \
 			--server https://%s:6443 \
 			--token %s \
 			--tls-san=%s --tls-san=$(hostname -I | awk '{print $1}') \
-			--write-kubeconfig-mode 644
+			--write-kubeconfig-mode 644 \
+			--flannel-backend=none \
+			--disable-kube-proxy \
+			--disable=traefik \
+			--disable=servicelb
 			sudo systemctl enable --now k3s
 			echo "K3s server joined cluster successfully"
-		`, lbIP, lbIP, k3sToken, lbIP)
+		`, suseRegCmd, lbIP, lbIP, k3sToken, lbIP)
 	}
 	resourceName := fmt.Sprintf("k3s-server-%s", strings.ReplaceAll(serverIP, ".", "-"))
 	dependencies := []pulumi.Resource{vmDependency}
@@ -1215,7 +1292,9 @@ sudo sysctl --system
 
 # Install containerd
 wait_for_apt
-sudo apt-get update && sudo apt-get install -y containerd
+sudo apt-get update
+wait_for_apt 
+sudo apt-get install -y containerd
 
 # Configure containerd
 sudo mkdir -p /etc/containerd
@@ -1233,11 +1312,13 @@ curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key | sudo gpg --
 
 echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
 wait_for_apt
-sudo apt-get update && sudo apt-get install -y kubelet kubeadm kubectl && sudo apt-mark hold kubelet kubeadm kubectl
+sudo apt-get update
+wait_for_apt
+sudo apt-get install -y kubelet kubeadm kubectl && sudo apt-mark hold kubelet kubeadm kubectl
 
 sudo systemctl enable kubelet
 
-# Install Helm
+# Install Helm₹
 curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash
 
 # Initialize control plane
@@ -1253,6 +1334,8 @@ sudo kubeadm init \
 mkdir -p $HOME/.kube
 sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
 sudo chown $(id -u):$(id -g) $HOME/.kube/config
+# Remove control plane taint to allow pod scheduling
+kubectl taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule-
 
 
 # Install Cilium CNI
@@ -1266,7 +1349,27 @@ helm install cilium cilium/cilium --version 1.18.4 \
     --namespace kube-system \
     --set kubeProxyReplacement=true \
     --set k8sServiceHost=${API_SERVER_IP} \
-    --set k8sServicePort=${API_SERVER_PORT}
+    --set k8sServicePort=${API_SERVER_PORT} \
+	--set hubble.relay.enabled=true
+
+# install cilium binary
+CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
+CLI_ARCH=amd64
+if [ "$(uname -m)" = "aarch64" ]; then CLI_ARCH=arm64; fi
+curl -L --fail --remote-name-all https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
+sha256sum --check cilium-linux-${CLI_ARCH}.tar.gz.sha256sum
+sudo tar xzvfC cilium-linux-${CLI_ARCH}.tar.gz /usr/local/bin
+rm cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
+cilium status
+
+# install hubble binary
+HUBBLE_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/hubble/master/stable.txt)
+HUBBLE_ARCH=amd64
+if [ "$(uname -m)" = "aarch64" ]; then HUBBLE_ARCH=arm64; fi
+curl -L --fail --remote-name-all https://github.com/cilium/hubble/releases/download/$HUBBLE_VERSION/hubble-linux-${HUBBLE_ARCH}.tar.gz{,.sha256sum}
+sha256sum --check hubble-linux-${HUBBLE_ARCH}.tar.gz.sha256sum
+sudo tar xzvfC hubble-linux-${HUBBLE_ARCH}.tar.gz /usr/local/bin
+rm hubble-linux-${HUBBLE_ARCH}.tar.gz{,.sha256sum}
 
 # Upload certificates and get the certificate key
 CERT_KEY=$(sudo kubeadm init phase upload-certs --upload-certs 2>/dev/null | tail -1)
