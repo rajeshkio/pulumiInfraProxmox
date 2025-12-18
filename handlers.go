@@ -269,6 +269,13 @@ func installK3SServer(ctx *pulumi.Context, lbIP, vmPassword, serverIP string, vm
 		suseRegCmd = fmt.Sprintf("sudo SUSEConnect --url=https://scc.suse.com -e %s -r %s", suseEmail, suseCode)
 	}
 
+	if suseEmail == "" || suseCode == "" {
+		return nil, fmt.Errorf(`SUSE registration credentials not found in environment.
+		Please export the following variables:
+  		export SUSE_REGISTRATION_EMAIL="your-email@suse.com"
+  		export SUSE_REGISTRATION_CODE="your-registration-code"`)
+	}
+
 	if isFirstServer {
 		k3sCommand = pulumi.Sprintf(`#!/bin/bash
 		set -e
