@@ -150,7 +150,7 @@ config:
             name: supervisor
     # Kubeadm (not yet implemented)
     kubeadm:
-      enabled: false
+      enabled: true
       loadBalancer: ["kubeadm-lb"]
       controlPlane: ["kubeadm-servers"]
       workers: []

@@ -270,7 +270,9 @@ func installK3SServer(ctx *pulumi.Context, lbIP, vmPassword, serverIP string, vm
 	}
 
 	if isFirstServer {
-		k3sCommand = pulumi.Sprintf(`
+		k3sCommand = pulumi.Sprintf(`#!/bin/bash
+		set -e
+		set -x
 		sudo bash -c "cat > /etc/resolv.conf << 'EOF'
 nameserver 192.168.90.152
 EOF"
@@ -302,19 +304,19 @@ EOF"
 		done
 		
 		# Install Helm
-		curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash
+		curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash || true
 		
 		# Set kubeconfig for helm
 		export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 		
 		# Install Cilium CNI
-		helm repo add cilium https://helm.cilium.io/
-		helm repo update
+		/usr/local/bin/helm repo add cilium https://helm.cilium.io/
+		/usr/local/bin/helm repo update
 		
 		API_SERVER_IP=%s
 		API_SERVER_PORT=6443
 		
-		KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm install cilium cilium/cilium \
+		KUBECONFIG=/etc/rancher/k3s/k3s.yaml /usr/local/bin/helm install cilium cilium/cilium \
 			--namespace kube-system \
 			--set kubeProxyReplacement=true \
 			--set k8sServiceHost=${API_SERVER_IP} \
@@ -341,12 +343,14 @@ EOF"
 		
 		# Now wait for nodes to be ready
 		echo "Waiting for nodes to be ready..."
-		sudo k3s kubectl wait --for=condition=Ready nodes --all --timeout=300s
+		sudo /usr/local/bin/k3s kubectl wait --for=condition=Ready nodes --all --timeout=300s
 		
 		sudo ls /var/lib/rancher/k3s/server/node-token
-	`, suseRegCmd, lbIP, serverIP)
+	`, suseRegCmd, suseRegCmd, lbIP, serverIP)
 	} else {
-		k3sCommand = pulumi.Sprintf(`
+		k3sCommand = pulumi.Sprintf(`#!/bin/bash
+			set -e
+			set -x
 			sudo bash -c "cat > /etc/resolv.conf << 'EOF'
 nameserver 192.168.90.152
 EOF"
@@ -797,7 +801,9 @@ func installRKE2Server(ctx *pulumi.Context, lbIP, vmPassword, serverIP string, v
 
 	if isFirstServer {
 		// First server - initialize cluster
-		rke2Command = pulumi.Sprintf(`
+		rke2Command = pulumi.Sprintf(`#!/bin/bash
+			set -e
+			set -x
 			# Set DNS resolver
 			sudo tee /etc/resolv.conf << 'EOF'
 nameserver 192.168.90.152
@@ -814,7 +820,19 @@ tls-san:
   - %s
   - $(hostname -I | awk '{print $1}')
 write-kubeconfig-mode: "0644"
+disable-kube-proxy: true
+cni: none
+disable:
+  - rke2-ingress-nginx
+kube-apiserver-arg:
+  - '--audit-log-path=/var/lib/rancher/rke2/server/logs/audit.log'
+  - '--audit-log-maxage=30'
+  - '--audit-log-maxbackup=10'
+  - '--audit-log-maxsize=100'
 EOF
+
+
+
 
 			# Download and install RKE2
 			curl -sfL https://get.rke2.io | sudo sh -
@@ -825,13 +843,53 @@ EOF
 
 			# Wait for RKE2 to be ready
 			sleep 120
+
+			# Install Helm
+			curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash || true
+			
+			# Set kubeconfig for helm
+			export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+			
+			# Install Cilium CNI
+			/usr/local/bin/helm repo add cilium https://helm.cilium.io/
+			/usr/local/bin/helm repo update
+			
+			API_SERVER_IP=%s
+			API_SERVER_PORT=6443
+			
+			KUBECONFIG=/etc/rancher/rke2/rke2.yaml /usr/local/bin/helm install cilium cilium/cilium \
+				--namespace kube-system \
+				--set kubeProxyReplacement=true \
+				--set k8sServiceHost=${API_SERVER_IP} \
+				--set k8sServicePort=${API_SERVER_PORT} \
+				--set hubble.relay.enabled=true
+			
+			# Install cilium CLI
+			CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
+			CLI_ARCH=amd64
+			if [ "$(uname -m)" = "aarch64" ]; then CLI_ARCH=arm64; fi
+			curl -L --fail --remote-name-all https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
+			sha256sum --check cilium-linux-${CLI_ARCH}.tar.gz.sha256sum
+			sudo tar xzvfC cilium-linux-${CLI_ARCH}.tar.gz /usr/local/bin
+			rm cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
+			
+			# Install hubble CLI
+			HUBBLE_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/hubble/master/stable.txt)
+			HUBBLE_ARCH=amd64
+			if [ "$(uname -m)" = "aarch64" ]; then HUBBLE_ARCH=arm64; fi
+			curl -L --fail --remote-name-all https://github.com/cilium/hubble/releases/download/$HUBBLE_VERSION/hubble-linux-${HUBBLE_ARCH}.tar.gz{,.sha256sum}
+			sha256sum --check hubble-linux-${HUBBLE_ARCH}.tar.gz.sha256sum
+			sudo tar xzvfC hubble-linux-${HUBBLE_ARCH}.tar.gz /usr/local/bin
+			rm hubble-linux-${HUBBLE_ARCH}.tar.gz{,.sha256sum}
 			
 			# Wait for all nodes to be ready
 			sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml wait --for=condition=Ready nodes --all --timeout=300s
-		`, lbIP)
+		`, lbIP, serverIP)
 	} else {
 		// Additional servers - join cluster
-		rke2Command = pulumi.Sprintf(`
+		rke2Command = pulumi.Sprintf(`#!/bin/bash
+			set -e
+			set -x
 			# Set DNS resolver
 			sudo tee /etc/resolv.conf << 'EOF'
 nameserver 192.168.90.152
@@ -854,6 +912,15 @@ tls-san:
   - %s
   - $(hostname -I | awk '{print $1}')
 write-kubeconfig-mode: "0644"
+disable-kube-proxy: true
+cni: none
+disable:
+  - rke2-ingress-nginx
+kube-apiserver-arg:
+  - '--audit-log-path=/var/lib/rancher/rke2/server/logs/audit.log'
+  - '--audit-log-maxage=30'
+  - '--audit-log-maxbackup=10'
+  - '--audit-log-maxsize=100'
 EOF
 
 			# Download and install RKE2
@@ -955,6 +1022,9 @@ func getRKE2Token(ctx *pulumi.Context, firstServerIP, vmPassword string, vmDepen
 			DialErrorLimit: pulumi.IntPtr(20),
 		},
 		Create: pulumi.String(`
+			#!/bin/bash
+			set -e
+			set -x
 			# Wait for RKE2 to be fully ready and token file to exist
 			while ! sudo test -f /var/lib/rancher/rke2/server/node-token; do
 				echo "Waiting for RKE2 token file..."
@@ -1045,7 +1115,9 @@ func installKubeadmLoadBalancer(ctx *pulumi.Context, serviceCtx ServiceContext) 
 
 	haproxyConfig := generateKubeadmHAProxyConfig(backendIPs)
 
-	installScript := fmt.Sprintf(`
+	installScript := fmt.Sprintf(`#!/bin/bash
+	set -e
+	set -x
 echo "Installing HAProxy for Kubeadm on %s"
 
 # Update system
@@ -1319,7 +1391,7 @@ sudo apt-get install -y kubelet kubeadm kubectl && sudo apt-mark hold kubelet ku
 sudo systemctl enable kubelet
 
 # Install Helm₹
-curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash || true
 
 # Initialize control plane
 sudo kubeadm init \
@@ -1339,13 +1411,13 @@ kubectl taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule-
 
 
 # Install Cilium CNI
-helm repo add cilium https://helm.cilium.io/
-helm repo update
+/usr/local/bin/helm repo add cilium https://helm.cilium.io/
+/usr/local/bin/helm repo update
 
 API_SERVER_IP=%s
 API_SERVER_PORT=6443
 
-helm install cilium cilium/cilium --version 1.18.4 \
+KUBECONFIG=$HOME/.kube/config /usr/local/bin/helm install cilium cilium/cilium --version 1.18.4 \
     --namespace kube-system \
     --set kubeProxyReplacement=true \
     --set k8sServiceHost=${API_SERVER_IP} \

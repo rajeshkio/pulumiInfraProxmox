@@ -252,7 +252,6 @@ func createIPXEVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int
 		// Create node needs time to initialize cluster
 		opts = append(opts, pulumi.Timeouts(&pulumi.CustomTimeouts{
 			Create: "30m",
-			Update: "30m",
 			Delete: "10m",
 		}))
 	}
