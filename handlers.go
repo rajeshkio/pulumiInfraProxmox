@@ -19,6 +19,145 @@ var serviceHandlers = map[string]ServiceHandler{
 	//"talos":     handleTalosService,
 }
 
+func deployCiliumGateway(ctx *pulumi.Context, serverIP string, clusterType string, kubeconfigDependency pulumi.Resource) error {
+	// Determine kubectl command based on cluster type
+	var kubectlCmd string
+	switch clusterType {
+	case "k3s":
+		kubectlCmd = "kubectl"
+	case "rke2":
+		kubectlCmd = "sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml"
+	case "kubeadm":
+		kubectlCmd = "kubectl"
+	default:
+		return fmt.Errorf("unsupported cluster type: %s", clusterType)
+	}
+
+	// Get cert paths from environment
+	certPath := os.Getenv("TLS_CERT_PATH")
+	keyPath := os.Getenv("TLS_KEY_PATH")
+
+	if certPath == "" || keyPath == "" {
+		return fmt.Errorf(`TLS certificate paths not found in environment.
+		Please export:
+  			export TLS_CERT_PATH="./selfSignedCerts/tls.crt"
+  			export TLS_KEY_PATH="./selfSignedCerts/tls.key"`)
+	}
+
+	if _, err := os.Stat(certPath); os.IsNotExist(err) {
+		return fmt.Errorf("cert file not found: %s", certPath)
+	}
+	if _, err := os.Stat(keyPath); os.IsNotExist(err) {
+		return fmt.Errorf("key file not found: %s", keyPath)
+	}
+
+	certData, _ := os.ReadFile(certPath)
+	keyData, _ := os.ReadFile(keyPath)
+	//ctx.Log.Info(fmt.Sprintf("deployCiliumGateway: %s", kubectlCmd), nil)
+	deployScript := fmt.Sprintf(`#!/bin/bash
+		set -x
+		set -e
+		export KUBECONFIG=$HOME/.kube/config
+		# Create namespaces
+		%s create namespace cilium-gateway --dry-run=client -o yaml | %s apply -f -
+		%s create namespace certificates --dry-run=client -o yaml | %s apply -f -
+		
+		# Create TLS secret
+		cat > /tmp/tls.crt << 'EOF'
+%s
+EOF
+		cat > /tmp/tls.key << 'EOF'
+%s
+EOF
+		%s -n certificates create secret tls rajesh-tls-cert \
+			--cert=/tmp/tls.crt \
+			--key=/tmp/tls.key \
+			--dry-run=client -o yaml | %s apply -f -
+		rm /tmp/tls.crt /tmp/tls.key
+		
+		# Deploy ReferenceGrant
+		cat <<EOF | %s apply -f -
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-gateway-to-use-cert
+  namespace: certificates
+spec:
+  from:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    namespace: cilium-gateway
+  to:
+  - group: ""
+    kind: Secret
+EOF
+		
+		# Deploy Gateway
+		cat <<EOF | %s apply -f -
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: Gateway
+metadata:
+  name: rancher-master-gateway
+  namespace: cilium-gateway
+spec:
+  gatewayClassName: cilium
+  listeners:
+  - protocol: HTTPS
+    port: 443
+    name: rancher-master-gateway
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: rajesh-tls-cert
+        namespace: certificates
+        kind: Secret
+    allowedRoutes:
+      namespaces:
+        from: All
+EOF
+		
+		# Deploy IP Pool
+		cat <<EOF | %s apply -f -
+apiVersion: "cilium.io/v2alpha1"
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: "rancher-master-cluster-pool"
+spec:
+  blocks:
+    - start: "192.168.90.245"
+      stop: "192.168.90.250"
+EOF
+		
+		# Deploy L2 Announcement
+		cat <<EOF | %s apply -f -
+apiVersion: cilium.io/v2alpha1
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  name: default-l2-announcement-policy
+  namespace: kube-system
+spec:
+  externalIPs: true
+  loadBalancerIPs: true
+EOF
+		
+		echo "Cilium Gateway setup complete on %s"
+	`, kubectlCmd, kubectlCmd, kubectlCmd, kubectlCmd, string(certData), string(keyData),
+		kubectlCmd, kubectlCmd, kubectlCmd, kubectlCmd, kubectlCmd, kubectlCmd, clusterType)
+
+	_, err := remote.NewCommand(ctx, fmt.Sprintf("cilium-gateway-setup-%s", clusterType), &remote.CommandArgs{
+		Connection: &remote.ConnectionArgs{
+			Host:           pulumi.String(serverIP),
+			User:           pulumi.String("rajeshk"),
+			PrivateKey:     pulumi.String(os.Getenv("PROXMOX_VE_SSH_PRIVATE_KEY")),
+			PerDialTimeout: pulumi.IntPtr(30),
+			DialErrorLimit: pulumi.IntPtr(20),
+		},
+		Create: pulumi.String(deployScript),
+	}, pulumi.DependsOn([]pulumi.Resource{kubeconfigDependency}))
+
+	return err
+}
+
 func handleK3sService(ctx *pulumi.Context, serviceCtx ServiceContext) error {
 	ctx.Log.Info(fmt.Sprintf("Installing K3s service on %d VMs", len(serviceCtx.VMs)), nil)
 
@@ -77,10 +216,17 @@ func handleK3sService(ctx *pulumi.Context, serviceCtx ServiceContext) error {
 		}
 	}
 	if firstServerIP != "" {
-		err := getK3sKubeconfig(ctx, firstServerIP, serviceCtx.VMPassword, lbIP, serviceCtx.VMs[0])
+		kubeconfigCmd, err := getK3sKubeconfig(ctx, firstServerIP, serviceCtx.VMPassword, lbIP, lastServerCommand)
 		if err != nil {
 			return fmt.Errorf("failed to extract kubeconfig: %w", err)
 		}
+		ctx.Log.Info("Deploying Cilium Gateway on k3s...", nil)
+		err = deployCiliumGateway(ctx, firstServerIP, "k3s", kubeconfigCmd)
+		if err != nil {
+			ctx.Log.Error(fmt.Sprintf("Cilium Gateway deployment failed on k3s: %v", err), nil)
+			return fmt.Errorf("failed to deploy Cilium Gateway on k3s: %w", err)
+		}
+		ctx.Log.Info("Cilium Gateway deployed successfully on k3s", nil)
 	}
 
 	ctx.Log.Info(fmt.Sprintf("K3s service installed on %d servers", len(serviceCtx.VMs)), nil)
@@ -258,6 +404,7 @@ backend k3s-api-backend
 
 	return config.String()
 }
+
 func installK3SServer(ctx *pulumi.Context, lbIP, vmPassword, serverIP string, vmDependency pulumi.Resource, isFirstServer bool, k3sToken pulumi.StringOutput, haproxyDependency pulumi.Resource) (*remote.Command, error) {
 	var k3sCommand pulumi.StringInput
 
@@ -290,7 +437,6 @@ EOF"
 			--cluster-init \
 			--tls-san=%s \
 			--tls-san=$(hostname -I | awk '{print $1}') \
-			--write-kubeconfig-mode 644 \
 			--flannel-backend=none \
 			--disable-kube-proxy \
 			--disable=traefik \
@@ -309,12 +455,16 @@ EOF"
 		until sudo /usr/local/bin/k3s kubectl get --raw /healthz >/dev/null 2>&1; do
 			sleep 5
 		done
+
+		# Set up kubeconfig for non-root user
+		mkdir -p $HOME/.kube
+		sudo cp /etc/rancher/k3s/k3s.yaml $HOME/.kube/config
+		sudo chown $(id -u):$(id -g) $HOME/.kube/config
+		chmod 600 $HOME/.kube/config
+		export KUBECONFIG=$HOME/.kube/config
 		
 		# Install Helm
 		curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash || true
-		
-		# Set kubeconfig for helm
-		export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 		
 		# Install Cilium CNI
 		/usr/local/bin/helm repo add cilium https://helm.cilium.io/
@@ -322,13 +472,23 @@ EOF"
 		
 		API_SERVER_IP=%s
 		API_SERVER_PORT=6443
-		
-		KUBECONFIG=/etc/rancher/k3s/k3s.yaml /usr/local/bin/helm install cilium cilium/cilium \
+
+		# Install support for kubernetes gateway api
+		kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/standard-install.yaml
+		kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/experimental-install.yaml --server-side --force-conflicts
+
+		KUBECONFIG=$HOME/.kube/config /usr/local/bin/helm install cilium cilium/cilium \
 			--namespace kube-system \
 			--set kubeProxyReplacement=true \
 			--set k8sServiceHost=${API_SERVER_IP} \
 			--set k8sServicePort=${API_SERVER_PORT} \
-			--set hubble.relay.enabled=true
+			--set hubble.relay.enabled=true \
+			--set l2announcements.enabled=true \
+			--set externalIPs.enabled=true \
+			--set gatewayAPI.enabled=true \
+			--set envoy.enabled=true \
+			--set debug.enabled=true \
+			--set securityContext.capabilities.keepCapNetBindService=true 
 		
 		# Install cilium CLI
 		CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
@@ -353,7 +513,7 @@ EOF"
 		sudo /usr/local/bin/k3s kubectl wait --for=condition=Ready nodes --all --timeout=300s
 		
 		sudo ls /var/lib/rancher/k3s/server/node-token
-	`, suseRegCmd, suseRegCmd, lbIP, serverIP)
+	`, suseRegCmd, lbIP, serverIP)
 	} else {
 		k3sCommand = pulumi.Sprintf(`#!/bin/bash
 			set -e
@@ -373,12 +533,19 @@ EOF"
 			--server https://%s:6443 \
 			--token %s \
 			--tls-san=%s --tls-san=$(hostname -I | awk '{print $1}') \
-			--write-kubeconfig-mode 644 \
 			--flannel-backend=none \
 			--disable-kube-proxy \
 			--disable=traefik \
 			--disable=servicelb
+
 			sudo systemctl enable --now k3s
+
+			# Set up kubeconfig for non-root user
+			mkdir -p $HOME/.kube
+			sudo cp /etc/rancher/k3s/k3s.yaml $HOME/.kube/config
+			sudo chown $(id -u):$(id -g) $HOME/.kube/config
+			chmod 600 $HOME/.kube/config
+
 			echo "K3s server joined cluster successfully"
 		`, suseRegCmd, lbIP, lbIP, k3sToken, lbIP)
 	}
@@ -472,7 +639,7 @@ func getK3sToken(ctx *pulumi.Context, firstServerIP, vmPassword string, vmDepend
 	return cmd, err
 }
 
-func getK3sKubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, vmDependency pulumi.Resource) error {
+func getK3sKubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, lastServerCommand pulumi.Resource) (*remote.Command, error) {
 	resourceName := fmt.Sprintf("k3s-kubeconfig-%s", strings.ReplaceAll(serverIP, ".", "-"))
 
 	kubeconfigCommand := fmt.Sprintf(`
@@ -494,25 +661,25 @@ func getK3sKubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, vm
 			DialErrorLimit: pulumi.IntPtr(20),
 		},
 		Create: pulumi.String(kubeconfigCommand),
-	}, pulumi.DependsOn([]pulumi.Resource{vmDependency}))
+	}, pulumi.DependsOn([]pulumi.Resource{lastServerCommand}))
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	kubeconfigPath := "./k3s-kubeconfig.yaml"
-	_, err = local.NewFile(ctx, "save-kubeconfig", &local.FileArgs{
+	_, err = local.NewFile(ctx, "save-k3s-kubeconfig", &local.FileArgs{
 		Filename: pulumi.String(kubeconfigPath),
 		Content:  cmd.Stdout,
 	}, pulumi.DependsOn([]pulumi.Resource{cmd}),
 		pulumi.ReplaceOnChanges([]string{"content"}))
 
 	if err != nil {
-		return fmt.Errorf("failed to save kubeconfig locally: %w", err)
+		return nil, fmt.Errorf("failed to save kubeconfig locally: %w", err)
 	}
 	ctx.Export("kubeconfig", cmd.Stdout)
 	ctx.Log.Info("kubeconfig exported successfully", nil)
-	return nil
+	return cmd, nil
 }
 
 // RKE2 Service Handler
@@ -599,10 +766,18 @@ func handleRKE2Service(ctx *pulumi.Context, serviceCtx ServiceContext) error {
 
 	// Export kubeconfig from first server
 	if firstServerIP != "" {
-		err := getRKE2Kubeconfig(ctx, firstServerIP, serviceCtx.VMPassword, lbIP, serverVMs[0])
+		kubeconfigCmd, err := getRKE2Kubeconfig(ctx, firstServerIP, serviceCtx.VMPassword, lbIP, lastServerCommand)
 		if err != nil {
 			return fmt.Errorf("failed to extract rke2 kubeconfig: %w", err)
 		}
+
+		ctx.Log.Info("Deploying Cilium Gateway...", nil)
+		err = deployCiliumGateway(ctx, firstServerIP, "rke2", kubeconfigCmd)
+		if err != nil {
+			ctx.Log.Error(fmt.Sprintf("Cilium Gateway deployment failed on rke2: %v", err), nil)
+			return fmt.Errorf("failed to deploy Cilium Gateway on rke2: %w", err)
+		}
+		ctx.Log.Info("Cilium Gateway deployed successfully on rke2", nil)
 	}
 
 	ctx.Log.Info(fmt.Sprintf("RKE2 service installed on %d servers", len(serverVMs)), nil)
@@ -826,7 +1001,6 @@ cluster-init: true
 tls-san:
   - %s
   - $(hostname -I | awk '{print $1}')
-write-kubeconfig-mode: "0644"
 disable-kube-proxy: true
 cni: none
 disable:
@@ -854,8 +1028,12 @@ EOF
 			# Install Helm
 			curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash || true
 			
-			# Set kubeconfig for helm
-			export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+			# Set up kubeconfig for non-root user
+			mkdir -p $HOME/.kube
+			sudo cp /etc/rancher/rke2/rke2.yaml $HOME/.kube/config
+			sudo chown $(id -u):$(id -g) $HOME/.kube/config
+			chmod 600 $HOME/.kube/config
+			export KUBECONFIG=$HOME/.kube/config
 			
 			# Install Cilium CNI
 			/usr/local/bin/helm repo add cilium https://helm.cilium.io/
@@ -863,13 +1041,23 @@ EOF
 			
 			API_SERVER_IP=%s
 			API_SERVER_PORT=6443
+
+			# Install support for kubernetes gateway api
+			sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/standard-install.yaml 
+			sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/experimental-install.yaml --server-side --force-conflicts
 			
-			KUBECONFIG=/etc/rancher/rke2/rke2.yaml /usr/local/bin/helm install cilium cilium/cilium \
+			KUBECONFIG=$HOME/.kube/config /usr/local/bin/helm install cilium cilium/cilium \
 				--namespace kube-system \
 				--set kubeProxyReplacement=true \
 				--set k8sServiceHost=${API_SERVER_IP} \
 				--set k8sServicePort=${API_SERVER_PORT} \
-				--set hubble.relay.enabled=true
+				--set hubble.relay.enabled=true \
+				--set l2announcements.enabled=true \
+				--set externalIPs.enabled=true \
+				--set gatewayAPI.enabled=true \
+				--set envoy.enabled=true \
+				--set debug.enabled=true \
+				--set securityContext.capabilities.keepCapNetBindService=true 
 			
 			# Install cilium CLI
 			CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
@@ -936,6 +1124,13 @@ EOF
 			# Enable and start RKE2 server
 			sudo systemctl enable rke2-server.service
 			sudo systemctl start rke2-server.service
+
+			# Set up kubeconfig for non-root user
+			mkdir -p $HOME/.kube
+			sudo cp /etc/rancher/rke2/rke2.yaml $HOME/.kube/config
+			sudo chown $(id -u):$(id -g) $HOME/.kube/config
+			chmod 600 $HOME/.kube/config
+			export KUBECONFIG=$HOME/.kube/config
 
 			echo "RKE2 server joined cluster successfully"
 		`, lbIP, lbIP, rke2Token, lbIP)
@@ -1047,7 +1242,7 @@ func getRKE2Token(ctx *pulumi.Context, firstServerIP, vmPassword string, vmDepen
 	return cmd, err
 }
 
-func getRKE2Kubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, vmDependency pulumi.Resource) error {
+func getRKE2Kubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, lastServerCommand pulumi.Resource) (*remote.Command, error) {
 	resourceName := fmt.Sprintf("rke2-kubeconfig-%s", strings.ReplaceAll(serverIP, ".", "-"))
 
 	kubeconfigCommand := fmt.Sprintf(`
@@ -1068,10 +1263,10 @@ func getRKE2Kubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, v
 			DialErrorLimit: pulumi.IntPtr(20),
 		},
 		Create: pulumi.String(kubeconfigCommand),
-	}, pulumi.DependsOn([]pulumi.Resource{vmDependency}))
+	}, pulumi.DependsOn([]pulumi.Resource{lastServerCommand}))
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	kubeconfigPath := "./rke2-kubeconfig.yaml"
@@ -1082,12 +1277,12 @@ func getRKE2Kubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, v
 		pulumi.ReplaceOnChanges([]string{"content"}))
 
 	if err != nil {
-		return fmt.Errorf("failed to save rke2 kubeconfig locally: %w", err)
+		return nil, fmt.Errorf("failed to save rke2 kubeconfig locally: %w", err)
 	}
 	ctx.Export("rke2-kubeconfig", cmd.Stdout)
 	ctx.Export("rke2-kubeconfigPath", pulumi.String(kubeconfigPath))
 	ctx.Log.Info("RKE2 kubeconfig exported successfully", nil)
-	return nil
+	return cmd, nil
 }
 
 func installKubeadmLoadBalancer(ctx *pulumi.Context, serviceCtx ServiceContext) error {
@@ -1272,7 +1467,7 @@ func handleKubeadmService(ctx *pulumi.Context, serviceCtx ServiceContext) error 
 	firstControlPlaneVM := controlPlaneVMs[0]
 
 	ctx.Log.Info(fmt.Sprintf("Initializing first control plane node: %s", firstControlPlaneIP), nil)
-	joinCommand, err := initKubeadmControlPlane(ctx, firstControlPlaneIP, lbIP, firstControlPlaneVM, serviceCtx)
+	initCmd, joinCommand, err := initKubeadmControlPlane(ctx, firstControlPlaneIP, lbIP, firstControlPlaneVM, serviceCtx)
 	if err != nil {
 		return fmt.Errorf("failed to initialize control plane: %w", err)
 	}
@@ -1288,10 +1483,17 @@ func handleKubeadmService(ctx *pulumi.Context, serviceCtx ServiceContext) error 
 
 	// Export kubeconfig from first server
 	if firstControlPlaneIP != "" {
-		err := getKubeadmKubeconfig(ctx, firstControlPlaneIP, serviceCtx.VMPassword, lbIP, controlPlaneVMs[0])
+		kubeconfigCmd, err := getKubeadmKubeconfig(ctx, firstControlPlaneIP, serviceCtx.VMPassword, lbIP, initCmd)
 		if err != nil {
 			return fmt.Errorf("failed to extract kubeadm kubeconfig: %w", err)
 		}
+		ctx.Log.Info("Deploying Cilium Gateway on kubeadm...", nil)
+		err = deployCiliumGateway(ctx, firstControlPlaneIP, "kubeadm", kubeconfigCmd)
+		if err != nil {
+			ctx.Log.Error(fmt.Sprintf("Cilium Gateway deployment failed on kubeadm: %v", err), nil)
+			return fmt.Errorf("failed to deploy Cilium Gateway on kubeadm: %w", err)
+		}
+		ctx.Log.Info("Cilium Gateway deployed successfully on kubeadm", nil)
 	}
 
 	// Join worker nodes if configured
@@ -1326,7 +1528,7 @@ func handleKubeadmService(ctx *pulumi.Context, serviceCtx ServiceContext) error 
 // K3S Worker Installation Function
 // ========================================
 
-func initKubeadmControlPlane(ctx *pulumi.Context, ip string, lbIP string, vmResource *vm.VirtualMachine, serviceCtx ServiceContext) (pulumi.StringOutput, error) {
+func initKubeadmControlPlane(ctx *pulumi.Context, ip string, lbIP string, vmResource *vm.VirtualMachine, serviceCtx ServiceContext) (*remote.Command, pulumi.StringOutput, error) {
 	ctx.Log.Info(fmt.Sprintf("Hello From initKubeadmControlPlane on ip %s", ip), nil)
 	// Get configuration
 	config := serviceCtx.ServiceConfig.Config
@@ -1424,12 +1626,23 @@ kubectl taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule-
 API_SERVER_IP=%s
 API_SERVER_PORT=6443
 
-KUBECONFIG=$HOME/.kube/config /usr/local/bin/helm install cilium cilium/cilium --version 1.18.4 \
+# Install support for kubernetes gateway api
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/standard-install.yaml 
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/experimental-install.yaml --server-side --force-conflicts
+
+KUBECONFIG=$HOME/.kube/config /usr/local/bin/helm install cilium cilium/cilium \
     --namespace kube-system \
     --set kubeProxyReplacement=true \
     --set k8sServiceHost=${API_SERVER_IP} \
     --set k8sServicePort=${API_SERVER_PORT} \
-	--set hubble.relay.enabled=true
+	--set hubble.relay.enabled=true \
+	--set l2announcements.enabled=true \
+	--set externalIPs.enabled=true \
+	--set gatewayAPI.enabled=true \
+	--set envoy.enabled=true \
+	--set debug.enabled=true \
+	--set securityContext.capabilities.keepCapNetBindService=true 
+
 
 # install cilium binary
 CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
@@ -1472,7 +1685,7 @@ echo "Control plane initialized successfully"
 	}, pulumi.DependsOn([]pulumi.Resource{vmResource}))
 
 	if err != nil {
-		return pulumi.StringOutput{}, err
+		return nil, pulumi.StringOutput{}, err
 	}
 
 	// Read the join command
@@ -1482,10 +1695,10 @@ echo "Control plane initialized successfully"
 	}, pulumi.DependsOn([]pulumi.Resource{cmd}))
 
 	if err != nil {
-		return pulumi.StringOutput{}, err
+		return nil, pulumi.StringOutput{}, err
 	}
 
-	return joinCmd.Stdout, nil
+	return cmd, joinCmd.Stdout, nil
 }
 
 func joinKubeadmControlPlane(ctx *pulumi.Context, ip string, vmResource *vm.VirtualMachine, joinCommand pulumi.StringOutput, serviceCtx ServiceContext) error {
@@ -1618,7 +1831,7 @@ systemctl enable kubelet
 	return err
 }
 
-func getKubeadmKubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, vmDependency pulumi.Resource) error {
+func getKubeadmKubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string, initCmd pulumi.Resource) (*remote.Command, error) {
 	resourceName := fmt.Sprintf("kubeadm-kubeconfig-%s", strings.ReplaceAll(serverIP, ".", "-"))
 
 	kubeconfigCommand := fmt.Sprintf(`
@@ -1639,10 +1852,10 @@ func getKubeadmKubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string
 			DialErrorLimit: pulumi.IntPtr(20),
 		},
 		Create: pulumi.String(kubeconfigCommand),
-	}, pulumi.DependsOn([]pulumi.Resource{vmDependency}))
+	}, pulumi.DependsOn([]pulumi.Resource{initCmd}))
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 	kubeconfigPath := "./kubeadm-kubeconfig.yaml"
 	_, err = local.NewFile(ctx, "save-kubeadm-kubeconfig", &local.FileArgs{
@@ -1652,12 +1865,12 @@ func getKubeadmKubeconfig(ctx *pulumi.Context, serverIP, vmPassword, lbIP string
 		pulumi.ReplaceOnChanges([]string{"content"}))
 
 	if err != nil {
-		return fmt.Errorf("failed to save kubeadm kubeconfig locally: %w", err)
+		return nil, fmt.Errorf("failed to save kubeadm kubeconfig locally: %w", err)
 	}
 	ctx.Export("kubeadm-kubeconfig", cmd.Stdout)
 	ctx.Export("kubeadm-kubeconfigPath", pulumi.String(kubeconfigPath))
 	ctx.Log.Info("Kubeadm kubeconfig exported successfully", nil)
-	return nil
+	return cmd, nil
 
 }
 
