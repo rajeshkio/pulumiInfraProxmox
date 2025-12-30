@@ -122,6 +122,7 @@ apiVersion: "cilium.io/v2alpha1"
 kind: CiliumLoadBalancerIPPool
 metadata:
   name: "rancher-master-cluster-pool"
+  namespace: kube-system
 spec:
   blocks:
     - start: "192.168.90.245"
@@ -1056,6 +1057,7 @@ EOF
 				--set externalIPs.enabled=true \
 				--set gatewayAPI.enabled=true \
 				--set envoy.enabled=true \
+				--set envoy.log.defaultLevel=debug \
 				--set debug.enabled=true \
 				--set securityContext.capabilities.keepCapNetBindService=true 
 			
@@ -1602,6 +1604,14 @@ sudo systemctl enable kubelet
 # Install Helm₹
 curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash || true
 
+# Configure kubelet before kubeadm init
+sudo mkdir -p /var/lib/kubelet
+sudo tee /var/lib/kubelet/config.yaml <<EOF
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+serverTLSBootstrap: true
+EOF
+
 # Initialize control plane
 sudo kubeadm init \
   --pod-network-cidr=%s \
@@ -1671,6 +1681,15 @@ JOIN_CMD=$(sudo kubeadm token create --print-join-command)
 echo "$JOIN_CMD --certificate-key $CERT_KEY --control-plane" | sudo tee /tmp/kubeadm-join-command.txt
 
 echo "Control plane initialized successfully"
+
+echo "Setup kube-bench"
+curl -L https://github.com/aquasecurity/kube-bench/releases/download/v0.14.1/kube-bench_0.14.1_linux_amd64.tar.gz -o kube-bench.tar.gz
+tar -xvf kube-bench.tar.gz
+sudo mv kube-bench /usr/local/bin/
+sudo mkdir -p /etc/kube-bench
+sudo cp -r cfg/ /etc/kube-bench/
+sudo kube-bench version
+
 `, podCIDR, serviceCIDR, ip, lbIP, ip)
 
 	connection := &remote.ConnectionArgs{
@@ -1743,6 +1762,14 @@ sudo apt-get update
 sudo apt-get install -y kubelet kubeadm kubectl
 sudo apt-mark hold kubelet kubeadm kubectl
 sudo systemctl enable kubelet
+
+echo "Setup kube-bench"
+curl -L https://github.com/aquasecurity/kube-bench/releases/download/v0.14.1/kube-bench_0.14.1_linux_amd64.tar.gz -o kube-bench.tar.gz
+tar -xvf kube-bench.tar.gz
+sudo mv kube-bench /usr/local/bin/
+sudo mkdir -p /etc/kube-bench
+sudo cp -r cfg/ /etc/kube-bench/
+sudo kube-bench version
 
 # Join as control plane
 echo "sudo %s"

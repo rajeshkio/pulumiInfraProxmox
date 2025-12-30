@@ -169,7 +169,7 @@ func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 			IpConfigs: ipConfig,
 		},
 		Started: pulumi.Bool(true),
-		OnBoot:  pulumi.Bool(false),
+		OnBoot:  pulumi.Bool(true),
 	}, opts...)
 	if err != nil {
 		return nil, err
@@ -301,7 +301,7 @@ func createIPXEVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int
 			},
 		},
 		Started: pulumi.Bool(true),
-		OnBoot:  pulumi.Bool(false),
+		OnBoot:  pulumi.Bool(true),
 		//	Protection: pulumi.Bool(true), Commenting this line for testing. will remove later TODO.
 	}, append(opts, pulumi.Protect(true))...)
 	if err != nil {

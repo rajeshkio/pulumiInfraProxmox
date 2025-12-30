@@ -50,6 +50,7 @@ config:
   proxmoxInfra:vms:
     # K3s Infrastructure
     - <<: *lb-vm
+      count: 0
       name: "k3s-lb"
       ips: ["192.168.90.200"]
 
@@ -58,6 +59,7 @@ config:
       ips: ["192.168.90.180", "192.168.90.181", "192.168.90.182"]
       cpu: 8
       memory: 8000
+      count: 0
       diskSize: 150
 
     - <<: *k8s-worker
@@ -77,7 +79,7 @@ config:
       ips: ["192.168.90.210", "192.168.90.211", "192.168.90.212"]
       templateId: 9001
       cpu: 8
-      memory: 8000
+      memory: 12000
       proxmoxNode: proxmox-3
 
     - <<: *k8s-worker
@@ -99,7 +101,7 @@ config:
       ips: ["192.168.90.230", "192.168.90.231", "192.168.90.232"]
       cpu: 8
       memory: 8000
-      proxmoxNode: proxmox-1
+      proxmoxNode: proxmox-2
 
     - <<: *k8s-worker
       name: "kubeadm-workers"
@@ -123,7 +125,7 @@ config:
   # Enable only what you need - services discover their target VMs
   proxmoxInfra:services:
     k3s:
-      enabled: true
+      enabled: false
       loadBalancer: ["k3s-lb"]
       controlPlane: ["k3s-servers"]
       workers: []
