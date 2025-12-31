@@ -73,6 +73,7 @@ config:
       ips: ["192.168.90.201"]
       templateId: 9002
       proxmoxNode: proxmox-3
+      count: 0
 
     - <<: *k8s-cp
       name: "rke2-servers"
@@ -81,6 +82,7 @@ config:
       cpu: 8
       memory: 12000
       proxmoxNode: proxmox-3
+      count: 0
 
     - <<: *k8s-worker
       name: "rke2-workers"
@@ -137,7 +139,7 @@ config:
             frontend: 6443
             name: api
     rke2:
-      enabled: true
+      enabled: false
       loadBalancer: ["rke2-lb"]
       controlPlane: ["rke2-servers"]
       workers: []

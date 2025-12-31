@@ -1532,17 +1532,53 @@ func handleKubeadmService(ctx *pulumi.Context, serviceCtx ServiceContext) error 
 
 func initKubeadmControlPlane(ctx *pulumi.Context, ip string, lbIP string, vmResource *vm.VirtualMachine, serviceCtx ServiceContext) (*remote.Command, pulumi.StringOutput, error) {
 	ctx.Log.Info(fmt.Sprintf("Hello From initKubeadmControlPlane on ip %s", ip), nil)
-	// Get configuration
+
+	// Check if custom CA is provided (optional)
+	caCert := os.Getenv("K8S_CA_CERT")
+	caKey := os.Getenv("K8S_CA_KEY")
+
+	useCustomCA := caCert != "" && caKey != ""
+
+	if useCustomCA {
+		ctx.Log.Info("Using custom CA for cluster certificates", nil)
+	} else {
+		ctx.Log.Info("No custom CA provided - kubeadm will generate its own CA", nil)
+	}
+
 	config := serviceCtx.ServiceConfig.Config
 	podCIDR := getConfigString(config, "pod-cidr", "10.244.0.0/16")
 	serviceCIDR := getConfigString(config, "service-cidr", "10.96.0.0/12")
 
-	// Installation script
-	installScript := fmt.Sprintf(`#!/bin/bash
-	set -e
-	set -x
+	// Prepare CA setup script (empty if not using custom CA)
+	caSetupScript := ""
+	if useCustomCA {
+		caSetupScript = fmt.Sprintf(`
+# ============================================
+# Copy custom CA files before kubeadm init
+# ============================================
+sudo mkdir -p /etc/kubernetes/pki
 
-	# Wait for apt locks
+cat > /tmp/ca.crt <<'CA_CERT_EOF'
+%s
+CA_CERT_EOF
+
+cat > /tmp/ca.key <<'CA_KEY_EOF'
+%s
+CA_KEY_EOF
+
+sudo cp /tmp/ca.crt /etc/kubernetes/pki/ca.crt
+sudo cp /tmp/ca.key /etc/kubernetes/pki/ca.key
+sudo chmod 600 /etc/kubernetes/pki/ca.key
+
+echo "Custom CA files copied to /etc/kubernetes/pki/"
+`, caCert, caKey)
+	}
+
+	installScript := fmt.Sprintf(`#!/bin/bash
+set -e
+set -x
+
+# Wait for apt locks
 wait_for_apt() {
     while sudo fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || \
           sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
@@ -1601,33 +1637,57 @@ sudo apt-get install -y kubelet kubeadm kubectl && sudo apt-mark hold kubelet ku
 
 sudo systemctl enable kubelet
 
-# Install Helm₹
+# Install Helm
 curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash || true
 
-# Configure kubelet before kubeadm init
-sudo mkdir -p /var/lib/kubelet
-sudo tee /var/lib/kubelet/config.yaml <<EOF
+%s
+
+# ============================================
+# Create kubeadm config file
+# ============================================
+sudo tee /tmp/kubeadm-config.yaml <<KUBEADM_EOF
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: %s
+  bindPort: 6443
+nodeRegistration:
+  criSocket: unix:///var/run/containerd/containerd.sock
+  taints: []
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+kubernetesVersion: v1.34.3
+controlPlaneEndpoint: "%s:6443"
+networking:
+  podSubnet: %s
+  serviceSubnet: %s
+---
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 serverTLSBootstrap: true
-EOF
+KUBEADM_EOF
 
-# Initialize control plane
+# ============================================
+# Initialize cluster
+# ============================================
 sudo kubeadm init \
-  --pod-network-cidr=%s \
-  --service-cidr=%s \
-  --apiserver-advertise-address=%s \
-  --control-plane-endpoint=%s:6443 \
+  --config=/tmp/kubeadm-config.yaml \
   --upload-certs \
   --skip-phases=addon/kube-proxy
+
+# Verify CA issuer
+echo "Verifying CA issuer for apiserver certificate:"
+openssl x509 -in /etc/kubernetes/pki/apiserver.crt -noout -issuer
 
 # Set up kubeconfig
 mkdir -p $HOME/.kube
 sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
 sudo chown $(id -u):$(id -g) $HOME/.kube/config
-# Remove control plane taint to allow pod scheduling
-kubectl taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule-
 
+# Remove control plane taint to allow pod scheduling
+kubectl taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule- || true
 
 # Install Cilium CNI
 /usr/local/bin/helm repo add cilium https://helm.cilium.io/
@@ -1645,14 +1705,13 @@ KUBECONFIG=$HOME/.kube/config /usr/local/bin/helm install cilium cilium/cilium \
     --set kubeProxyReplacement=true \
     --set k8sServiceHost=${API_SERVER_IP} \
     --set k8sServicePort=${API_SERVER_PORT} \
-	--set hubble.relay.enabled=true \
-	--set l2announcements.enabled=true \
-	--set externalIPs.enabled=true \
-	--set gatewayAPI.enabled=true \
-	--set envoy.enabled=true \
-	--set debug.enabled=true \
-	--set securityContext.capabilities.keepCapNetBindService=true 
-
+    --set hubble.relay.enabled=true \
+    --set l2announcements.enabled=true \
+    --set externalIPs.enabled=true \
+    --set gatewayAPI.enabled=true \
+    --set envoy.enabled=true \
+    --set debug.enabled=true \
+    --set securityContext.capabilities.keepCapNetBindService=true 
 
 # install cilium binary
 CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
@@ -1663,6 +1722,11 @@ sha256sum --check cilium-linux-${CLI_ARCH}.tar.gz.sha256sum
 sudo tar xzvfC cilium-linux-${CLI_ARCH}.tar.gz /usr/local/bin
 rm cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
 cilium status
+
+# Approve pending kubelet serving certificates
+echo "Approving kubelet serving certificates..."
+sleep 10  # Give kubelets time to generate CSRs
+kubectl get csr | grep Pending | awk '{print $1}' | xargs kubectl certificate approve || true
 
 # install hubble binary
 HUBBLE_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/hubble/master/stable.txt)
@@ -1689,8 +1753,7 @@ sudo mv kube-bench /usr/local/bin/
 sudo mkdir -p /etc/kube-bench
 sudo cp -r cfg/ /etc/kube-bench/
 sudo kube-bench version
-
-`, podCIDR, serviceCIDR, ip, lbIP, ip)
+`, caSetupScript, ip, lbIP, podCIDR, serviceCIDR, ip)
 
 	connection := &remote.ConnectionArgs{
 		Host:       pulumi.String(ip),
@@ -1721,10 +1784,49 @@ sudo kube-bench version
 }
 
 func joinKubeadmControlPlane(ctx *pulumi.Context, ip string, vmResource *vm.VirtualMachine, joinCommand pulumi.StringOutput, serviceCtx ServiceContext) error {
+
+	// Check if custom CA is provided (optional)
+	caCert := os.Getenv("CA_CERT")
+	caKey := os.Getenv("CA_KEY")
+
+	useCustomCA := caCert != "" && caKey != ""
+
+	if useCustomCA {
+		ctx.Log.Info("Using custom CA for joining control plane", nil)
+	} else {
+		ctx.Log.Info("No custom CA provided - using cluster's CA", nil)
+	}
+
+	// Prepare CA setup script (empty if not using custom CA)
+	caSetupScript := ""
+	if useCustomCA {
+		caSetupScript = fmt.Sprintf(`
+# ============================================
+# Copy custom CA files before kubeadm join
+# ============================================
+sudo mkdir -p /etc/kubernetes/pki
+
+cat > /tmp/ca.crt <<'CA_CERT_EOF'
+%s
+CA_CERT_EOF
+
+cat > /tmp/ca.key <<'CA_KEY_EOF'
+%s
+CA_KEY_EOF
+
+sudo cp /tmp/ca.crt /etc/kubernetes/pki/ca.crt
+sudo cp /tmp/ca.key /etc/kubernetes/pki/ca.key
+sudo chmod 600 /etc/kubernetes/pki/ca.key
+
+echo "Custom CA files copied to /etc/kubernetes/pki/"
+`, caCert, caKey)
+	}
+
 	joinScript := joinCommand.ApplyT(func(cmd string) string {
 		return fmt.Sprintf(`#!/bin/bash
-	set -e
-	set -x
+set -e
+set -x
+
 # Same prerequisites as control plane
 sudo swapoff -a
 sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
@@ -1771,10 +1873,69 @@ sudo mkdir -p /etc/kube-bench
 sudo cp -r cfg/ /etc/kube-bench/
 sudo kube-bench version
 
-# Join as control plane
-echo "sudo %s"
-sudo %s
-`, cmd, cmd)
+%s
+
+# ============================================
+# Parse join command and create config file
+# ============================================
+
+# Parse the join command
+JOIN_CMD="%s"
+
+# Extract components from join command
+API_ENDPOINT=$(echo "$JOIN_CMD" | grep -oP 'join \K[^ ]+')
+TOKEN=$(echo "$JOIN_CMD" | grep -oP -- '--token \K[^ ]+')
+CA_HASH=$(echo "$JOIN_CMD" | grep -oP -- '--discovery-token-ca-cert-hash \K[^ ]+')
+CERT_KEY=$(echo "$JOIN_CMD" | grep -oP -- '--certificate-key \K[^ ]+')
+
+echo "Parsed join parameters:"
+echo "  API Endpoint: $API_ENDPOINT"
+echo "  Token: $TOKEN"
+echo "  CA Hash: $CA_HASH"
+echo "  Certificate Key: $CERT_KEY"
+
+# Create kubeadm join config file with KubeletConfiguration
+sudo tee /tmp/kubeadm-join-config.yaml <<KUBEADM_JOIN_EOF
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: JoinConfiguration
+discovery:
+  bootstrapToken:
+    token: ${TOKEN}
+    apiServerEndpoint: "${API_ENDPOINT}"
+    caCertHashes:
+      - "${CA_HASH}"
+controlPlane:
+  certificateKey: ${CERT_KEY}
+nodeRegistration:
+  criSocket: unix:///var/run/containerd/containerd.sock
+  taints: []
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+serverTLSBootstrap: true
+KUBEADM_JOIN_EOF
+
+# Join using config file instead of command line
+echo "Joining cluster with config file..."
+sudo kubeadm join --config=/tmp/kubeadm-join-config.yaml
+
+# Verify CA issuer
+echo "Verifying CA issuer for apiserver certificate:"
+openssl x509 -in /etc/kubernetes/pki/apiserver.crt -noout -issuer
+
+echo "Control plane node joined successfully"
+
+# Set up kubeconfig
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+# Wait for kubelet CSR and approve
+echo "Waiting for kubelet serving CSR..."
+sleep 10
+kubectl get csr | grep Pending | awk '{print $1}' | xargs kubectl certificate approve || true
+`, caSetupScript, cmd)
 	}).(pulumi.StringOutput)
 
 	connection := &remote.ConnectionArgs{
