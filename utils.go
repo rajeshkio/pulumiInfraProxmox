@@ -187,8 +187,9 @@ func getEnabledServices(services *Services) []string {
 func createVMs(ctx *pulumi.Context, provider *proxmoxve.Provider, vms []VM, vmPassword string, vmCreationConfig *VMCreationConfig) (map[string][]*vm.VirtualMachine, error) {
 	vmGroups := make(map[string][]*vm.VirtualMachine)
 
-	// Track last VM created per template for dependency chaining
-	lastVMPerTemplate := make(map[int64]*vm.VirtualMachine)
+	// Track last VM created per template PER NODE (to avoid NFS lock contention on same node)
+	// Key format: "template-node" e.g. "9000-proxmox-2"
+	lastVMPerTemplatePerNode := make(map[string]*vm.VirtualMachine)
 
 	// Process each VM group
 	for _, vmDef := range vms {
@@ -226,12 +227,14 @@ func createVMs(ctx *pulumi.Context, provider *proxmoxve.Provider, vms []VM, vmPa
 			} else if vmDef.BootMethod == "ipxe" && i == 0 {
 				ctx.Log.Info(fmt.Sprintf("  [%d/%d] %s (CREATE - initializes cluster)", i+1, count, vmName), nil)
 			} else if vmDef.TemplateID > 0 {
-				// For regular VMs, use template-based dependency
-				if lastVM, exists := lastVMPerTemplate[vmDef.TemplateID]; exists {
+				// For regular VMs, use template-based dependency scoped to same node
+				// This prevents NFS lock contention without creating cross-service dependencies
+				templateNodeKey := fmt.Sprintf("%d-%s", vmDef.TemplateID, nodeName)
+				if lastVM, exists := lastVMPerTemplatePerNode[templateNodeKey]; exists {
 					dependsOn = []pulumi.Resource{lastVM}
-					ctx.Log.Info(fmt.Sprintf("  [%d/%d] %s (waits for previous VM)", i+1, count, vmName), nil)
+					ctx.Log.Info(fmt.Sprintf("  [%d/%d] %s (waits for previous VM on %s)", i+1, count, vmName, nodeName), nil)
 				} else {
-					ctx.Log.Info(fmt.Sprintf("  [%d/%d] %s (first from template %d)", i+1, count, vmName, vmDef.TemplateID), nil)
+					ctx.Log.Info(fmt.Sprintf("  [%d/%d] %s (first from template %d on %s)", i+1, count, vmName, vmDef.TemplateID, nodeName), nil)
 				}
 			}
 
@@ -254,7 +257,9 @@ func createVMs(ctx *pulumi.Context, provider *proxmoxve.Provider, vms []VM, vmPa
 			groupVMs = append(groupVMs, vmInstance)
 
 			if vmDef.TemplateID > 0 {
-				lastVMPerTemplate[vmDef.TemplateID] = vmInstance
+				// Update last VM for this template on this specific node
+				templateNodeKey := fmt.Sprintf("%d-%s", vmDef.TemplateID, nodeName)
+				lastVMPerTemplatePerNode[templateNodeKey] = vmInstance
 			}
 		}
 
