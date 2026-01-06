@@ -50,7 +50,7 @@ config:
   proxmoxInfra:vms:
     # K3s Infrastructure
     - <<: *lb-vm
-      count: 0
+      count: 1
       name: "k3s-lb"
       ips: ["192.168.90.200"]
 
@@ -59,7 +59,8 @@ config:
       ips: ["192.168.90.180", "192.168.90.181", "192.168.90.182"]
       cpu: 8
       memory: 8000
-      count: 0
+      templateId: 9001
+      count: 3
       diskSize: 150
 
     - <<: *k8s-worker
@@ -73,16 +74,16 @@ config:
       ips: ["192.168.90.201"]
       templateId: 9002
       proxmoxNode: proxmox-3
-      count: 0
+      count: 1
 
     - <<: *k8s-cp
       name: "rke2-servers"
       ips: ["192.168.90.210", "192.168.90.211", "192.168.90.212"]
-      templateId: 9001
-      cpu: 8
+      templateId: 9000
+      cpu: 12
       memory: 12000
       proxmoxNode: proxmox-3
-      count: 0
+      count: 3
 
     - <<: *k8s-worker
       name: "rke2-workers"
@@ -99,7 +100,7 @@ config:
     - <<: *k8s-cp
       name: "kubeadm-servers"
       count: 3
-      templateId: 9000 # Override template (Ubuntu not SLE Micro)
+      templateId: 9005 # Override template (Ubuntu not SLE Micro)
       ips: ["192.168.90.230", "192.168.90.231", "192.168.90.232"]
       cpu: 8
       memory: 8000
@@ -127,7 +128,7 @@ config:
   # Enable only what you need - services discover their target VMs
   proxmoxInfra:services:
     k3s:
-      enabled: false
+      enabled: true
       loadBalancer: ["k3s-lb"]
       controlPlane: ["k3s-servers"]
       workers: []
@@ -139,7 +140,7 @@ config:
             frontend: 6443
             name: api
     rke2:
-      enabled: false
+      enabled: true
       loadBalancer: ["rke2-lb"]
       controlPlane: ["rke2-servers"]
       workers: []

@@ -1616,58 +1616,6 @@ wait_for_apt() {
     done
 }
 
-# Disable swap
-sudo swapoff -a
-sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
-
-# Enable IP forwarding and bridging
-sudo tee /etc/modules-load.d/k8s.conf <<EOF
-overlay
-br_netfilter
-EOF
-
-sudo modprobe overlay
-sudo modprobe br_netfilter
-
-sudo tee /etc/sysctl.d/k8s.conf <<EOF
-net.bridge.bridge-nf-call-iptables  = 1
-net.bridge.bridge-nf-call-ip6tables = 1
-net.ipv4.ip_forward                 = 1
-EOF
-
-sudo sysctl --system
-
-# Install containerd
-wait_for_apt
-sudo apt-get update
-wait_for_apt 
-sudo apt-get install -y containerd
-
-# Configure containerd
-sudo mkdir -p /etc/containerd
-sudo containerd config default | sudo tee /etc/containerd/config.toml
-sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
-sudo systemctl restart containerd
-sudo systemctl enable containerd
-
-# Install kubeadm, kubelet, kubectl
-wait_for_apt
-sudo apt-get install -y apt-transport-https ca-certificates curl gpg
-
-sudo mkdir -p -m 755 /etc/apt/keyrings
-curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-
-echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
-wait_for_apt
-sudo apt-get update
-wait_for_apt
-sudo apt-get install -y kubelet kubeadm kubectl && sudo apt-mark hold kubelet kubeadm kubectl
-
-sudo systemctl enable kubelet
-
-# Install Helm
-curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash || true
-
 %s
 
 # ============================================
@@ -1854,44 +1802,6 @@ echo "Custom CA files copied to /etc/kubernetes/pki/"
 		return fmt.Sprintf(`#!/bin/bash
 set -e
 set -x
-
-# Same prerequisites as control plane
-sudo swapoff -a
-sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
-
-sudo tee /etc/modules-load.d/k8s.conf <<EOF
-overlay
-br_netfilter
-EOF
-
-sudo modprobe overlay
-sudo modprobe br_netfilter
-
-sudo tee /etc/sysctl.d/k8s.conf <<EOF
-net.bridge.bridge-nf-call-iptables  = 1
-net.bridge.bridge-nf-call-ip6tables = 1
-net.ipv4.ip_forward                 = 1
-EOF
-
-sudo sysctl --system
-
-# Install containerd
-sudo apt-get update && sudo apt-get install -y containerd
-sudo mkdir -p /etc/containerd
-sudo containerd config default | sudo tee /etc/containerd/config.toml
-sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
-sudo systemctl restart containerd
-sudo systemctl enable containerd
-
-# Install kubeadm, kubelet, kubectl
-sudo apt-get install -y apt-transport-https ca-certificates curl gpg
-sudo mkdir -p -m 755 /etc/apt/keyrings
-curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
-sudo apt-get update
-sudo apt-get install -y kubelet kubeadm kubectl
-sudo apt-mark hold kubelet kubeadm kubectl
-sudo systemctl enable kubelet
 
 echo "Setup kube-bench"
 curl -L https://github.com/aquasecurity/kube-bench/releases/download/v0.14.1/kube-bench_0.14.1_linux_amd64.tar.gz -o kube-bench.tar.gz
