@@ -19,7 +19,7 @@ var serviceHandlers = map[string]ServiceHandler{
 	//"talos":     handleTalosService,
 }
 
-func deployCiliumGateway(ctx *pulumi.Context, serverIP string, clusterType string, kubeconfigDependency pulumi.Resource) error {
+func deployCiliumGateway(ctx *pulumi.Context, serverIP string, clusterType string, kubeconfigDependency pulumi.Resource, ciliumStartIP, ciliumStopIP string) error {
 	// Determine kubectl command based on cluster type
 	var kubectlCmd string
 	switch clusterType {
@@ -125,8 +125,8 @@ metadata:
   namespace: kube-system
 spec:
   blocks:
-    - start: "192.168.90.245"
-      stop: "192.168.90.250"
+    - start: %s
+      stop: %s
 EOF
 		
 		# Deploy L2 Announcement
@@ -143,7 +143,7 @@ EOF
 		
 		echo "Cilium Gateway setup complete on %s"
 	`, kubectlCmd, kubectlCmd, kubectlCmd, kubectlCmd, string(certData), string(keyData),
-		kubectlCmd, kubectlCmd, kubectlCmd, kubectlCmd, kubectlCmd, kubectlCmd, clusterType)
+		kubectlCmd, kubectlCmd, kubectlCmd, kubectlCmd, kubectlCmd, ciliumStartIP, ciliumStopIP, kubectlCmd, clusterType)
 
 	_, err := remote.NewCommand(ctx, fmt.Sprintf("cilium-gateway-setup-%s", clusterType), &remote.CommandArgs{
 		Connection: &remote.ConnectionArgs{
@@ -222,7 +222,7 @@ func handleK3sService(ctx *pulumi.Context, serviceCtx ServiceContext) error {
 			return fmt.Errorf("failed to extract kubeconfig: %w", err)
 		}
 		ctx.Log.Info("Deploying Cilium Gateway on k3s...", nil)
-		err = deployCiliumGateway(ctx, firstServerIP, "k3s", kubeconfigCmd)
+		err = deployCiliumGateway(ctx, firstServerIP, "k3s", kubeconfigCmd, "192.168.91.10", "192.168.91.15")
 		if err != nil {
 			ctx.Log.Error(fmt.Sprintf("Cilium Gateway deployment failed on k3s: %v", err), nil)
 			return fmt.Errorf("failed to deploy Cilium Gateway on k3s: %w", err)
@@ -414,7 +414,7 @@ func installK3SServer(ctx *pulumi.Context, lbIP, vmPassword, serverIP string, vm
 
 	suseRegCmd := ""
 	if suseEmail != "" && suseCode != "" {
-		suseRegCmd = fmt.Sprintf("sudo SUSEConnect --url=https://scc.suse.com -e %s -r %s", suseEmail, suseCode)
+		suseRegCmd = fmt.Sprintf("sudo transactional-update register --url=https://scc.suse.com -e %s -r %s", suseEmail, suseCode)
 	}
 
 	if suseEmail == "" || suseCode == "" {
@@ -512,6 +512,13 @@ EOF"
 		# Now wait for nodes to be ready
 		echo "Waiting for nodes to be ready..."
 		sudo /usr/local/bin/k3s kubectl wait --for=condition=Ready nodes --all --timeout=300s
+
+		# Setting up Longhorn pre-requisites
+		curl -sSfL -o longhornctl https://github.com/longhorn/cli/releases/download/v1.10.1/longhornctl-linux-amd64
+		chmod +x longhornctl
+		sudo mv longhornctl /usr/local/bin/longhornctl
+		sudo transactional-update pkg install -y nfs-client cryptsetup device-mapper
+		
 		
 		sudo ls /var/lib/rancher/k3s/server/node-token
 	`, suseRegCmd, lbIP, serverIP)
@@ -546,6 +553,12 @@ EOF"
 			sudo cp /etc/rancher/k3s/k3s.yaml $HOME/.kube/config
 			sudo chown $(id -u):$(id -g) $HOME/.kube/config
 			chmod 600 $HOME/.kube/config
+
+			# Setting up Longhorn pre-requisites
+			curl -sSfL -o longhornctl https://github.com/longhorn/cli/releases/download/v1.10.1/longhornctl-linux-amd64
+			chmod +x longhornctl
+			sudo mv longhornctl /usr/local/bin/longhornctl
+			sudo transactional-update pkg install -y nfs-client cryptsetup device-mapper
 
 			echo "K3s server joined cluster successfully"
 		`, suseRegCmd, lbIP, lbIP, k3sToken, lbIP)
@@ -773,7 +786,7 @@ func handleRKE2Service(ctx *pulumi.Context, serviceCtx ServiceContext) error {
 		}
 
 		ctx.Log.Info("Deploying Cilium Gateway...", nil)
-		err = deployCiliumGateway(ctx, firstServerIP, "rke2", kubeconfigCmd)
+		err = deployCiliumGateway(ctx, firstServerIP, "rke2", kubeconfigCmd, "192.168.91.20", "192.168.91.25")
 		if err != nil {
 			ctx.Log.Error(fmt.Sprintf("Cilium Gateway deployment failed on rke2: %v", err), nil)
 			return fmt.Errorf("failed to deploy Cilium Gateway on rke2: %w", err)
@@ -988,9 +1001,13 @@ func installRKE2Server(ctx *pulumi.Context, lbIP, vmPassword, serverIP string, v
 			set -e
 			set -x
 			# Set DNS resolver
-			sudo tee /etc/resolv.conf << 'EOF'
-nameserver 192.168.90.152
+			sudo tee /etc/systemd/resolved.conf << 'EOF'
+[Resolve]
+DNS=192.168.90.152 8.8.8.8
+FallbackDNS=1.1.1.1
+DNSStubListener=no
 EOF
+			sudo systemctl restart systemd-resolved
 
 			# Create RKE2 config directory
 			sudo mkdir -p /etc/rancher/rke2
@@ -1020,8 +1037,7 @@ EOF
 			curl -sfL https://get.rke2.io | sudo sh -
 
 			# Enable and start RKE2 server
-			sudo systemctl enable rke2-server.service
-			sudo systemctl start rke2-server.service
+			sudo systemctl enable --now rke2-server.service &
 
 			# Wait for RKE2 to be ready
 			sleep 120
@@ -1043,9 +1059,11 @@ EOF
 			API_SERVER_IP=%s
 			API_SERVER_PORT=6443
 
+			sudo cp /var/lib/rancher/rke2/bin/kubectl /usr/local/bin
+
 			# Install support for kubernetes gateway api
-			sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/standard-install.yaml 
-			sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/experimental-install.yaml --server-side --force-conflicts
+			sudo /usr/local/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/standard-install.yaml 
+			sudo /usr/local/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/experimental-install.yaml --server-side --force-conflicts
 			
 			KUBECONFIG=$HOME/.kube/config /usr/local/bin/helm install cilium cilium/cilium \
 				--namespace kube-system \
@@ -1079,6 +1097,13 @@ EOF
 			sudo tar xzvfC hubble-linux-${HUBBLE_ARCH}.tar.gz /usr/local/bin
 			rm hubble-linux-${HUBBLE_ARCH}.tar.gz{,.sha256sum}
 			
+			# Setting up Longhorn pre-requisites
+			curl -sSfL -o longhornctl https://github.com/longhorn/cli/releases/download/v1.10.1/longhornctl-linux-amd64
+			chmod +x longhornctl
+			sudo mv longhornctl /usr/local/bin/longhornctl
+			kubectl --kubeconfig $HOME/.kube/config create namespace longhorn-system
+			longhornctl --kubeconfig $HOME/.kube/config --image longhornio/longhorn-cli:v1.10.1 install preflight
+
 			# Wait for all nodes to be ready
 			sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml wait --for=condition=Ready nodes --all --timeout=300s
 		`, lbIP, serverIP)
@@ -1088,9 +1113,13 @@ EOF
 			set -e
 			set -x
 			# Set DNS resolver
-			sudo tee /etc/resolv.conf << 'EOF'
-nameserver 192.168.90.152
+			sudo tee /etc/systemd/resolved.conf << 'EOF'
+[Resolve]
+DNS=192.168.90.152 8.8.8.8
+FallbackDNS=1.1.1.1
+DNSStubListener=no
 EOF
+			sudo systemctl restart systemd-resolved
 
 			# Wait for first server to be ready
 			until curl -k -s https://%s:9345/ping; do
@@ -1124,8 +1153,7 @@ EOF
 			curl -sfL https://get.rke2.io | sudo sh -
 
 			# Enable and start RKE2 server
-			sudo systemctl enable rke2-server.service
-			sudo systemctl start rke2-server.service
+			sudo systemctl enable --now rke2-server.service
 
 			# Set up kubeconfig for non-root user
 			mkdir -p $HOME/.kube
@@ -1490,7 +1518,7 @@ func handleKubeadmService(ctx *pulumi.Context, serviceCtx ServiceContext) error 
 			return fmt.Errorf("failed to extract kubeadm kubeconfig: %w", err)
 		}
 		ctx.Log.Info("Deploying Cilium Gateway on kubeadm...", nil)
-		err = deployCiliumGateway(ctx, firstControlPlaneIP, "kubeadm", kubeconfigCmd)
+		err = deployCiliumGateway(ctx, firstControlPlaneIP, "kubeadm", kubeconfigCmd, "192.168.91.30", "192.168.91.35")
 		if err != nil {
 			ctx.Log.Error(fmt.Sprintf("Cilium Gateway deployment failed on kubeadm: %v", err), nil)
 			return fmt.Errorf("failed to deploy Cilium Gateway on kubeadm: %w", err)
