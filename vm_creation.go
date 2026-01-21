@@ -65,7 +65,7 @@ func createVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int64, 
 
 	switch vmDef.BootMethod {
 	case "ipxe":
-		return createIPXEVM(ctx, provider, vmIndex, vmDef, nodeName, gateway, password, dependsOn)
+		return createHarvesterVM(ctx, provider, vmIndex, vmDef, nodeName, dependsOn)
 	case "cloud-init":
 		return createCloudInitVM(ctx, provider, vmIndex, vmDef, nodeName, gateway, password, dependsOn)
 	default:
@@ -102,7 +102,7 @@ func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 		ipConfig = &vm.VirtualMachineInitializationIpConfigArray{
 			&vm.VirtualMachineInitializationIpConfigArgs{
 				Ipv4: vm.VirtualMachineInitializationIpConfigIpv4Args{
-					Address: pulumi.String(vmDef.IPs[vmIndex] + "/24"),
+					Address: pulumi.String(vmDef.IPs[vmIndex] + "/23"),
 					Gateway: pulumi.String(gateway),
 				},
 			},
@@ -117,6 +117,7 @@ func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 		pulumi.Provider(provider),
 		pulumi.DeleteBeforeReplace(true),
 		pulumi.IgnoreChanges([]string{"clone", "disks"}),
+		pulumi.IgnoreChanges([]string{"nodeName"}),
 	}
 
 	// Add dependencies if provided
@@ -158,12 +159,12 @@ func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 			},
 		},
 		Initialization: &vm.VirtualMachineInitializationArgs{
-			DatastoreId: pulumi.String("nas-storage"),
+			DatastoreId: pulumi.String("vm-data"),
 			UserAccount: userAccount,
 			Dns: &vm.VirtualMachineInitializationDnsArgs{
 				Domain: pulumi.String("local"),
 				Servers: pulumi.StringArray{
-					pulumi.String("192.168.90.152"),
+					pulumi.String("192.168.90.1"),
 				},
 			},
 			IpConfigs: ipConfig,
@@ -177,7 +178,7 @@ func createCloudInitVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 	return vmInstance, nil
 }
 
-func createIPXEVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int64, vmDef VM, nodeName, gateway, password string, dependsOn []pulumi.Resource) (*vm.VirtualMachine, error) {
+func createHarvesterVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int64, vmDef VM, nodeName string, dependsOn []pulumi.Resource) (*vm.VirtualMachine, error) {
 	if vmDef.IPXEConfig == nil {
 		return nil, fmt.Errorf("iPXE boot method requires ipxeconfig")
 	}
@@ -246,6 +247,8 @@ func createIPXEVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int
 	opts := []pulumi.ResourceOption{
 		pulumi.Provider(provider),
 		pulumi.DeleteBeforeReplace(true),
+		pulumi.IgnoreChanges([]string{"nodeName"}),
+		pulumi.IgnoreChanges([]string{"clone", "disks"}),
 	}
 
 	if vmIndex == 0 {
@@ -290,7 +293,7 @@ func createIPXEVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmIndex int
 		},
 		Cdrom: &vm.VirtualMachineCdromArgs{
 			//	Enabled:   pulumi.Bool(true),
-			FileId:    pulumi.String(fmt.Sprintf("nas-storage:iso/%s", isoFileName)),
+			FileId:    pulumi.String(fmt.Sprintf("nas-vm-images:iso/%s", isoFileName)),
 			Interface: pulumi.String("ide2"),
 		},
 		NetworkDevices: &vm.VirtualMachineNetworkDeviceArray{

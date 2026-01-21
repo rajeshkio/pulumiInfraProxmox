@@ -103,7 +103,7 @@ spec:
   gatewayClassName: cilium
   listeners:
   - protocol: HTTPS
-    port: 443
+    port: 443	
     name: rancher-master-gateway
     tls:
       mode: Terminate
@@ -429,7 +429,7 @@ func installK3SServer(ctx *pulumi.Context, lbIP, vmPassword, serverIP string, vm
 		set -e
 		set -x
 		sudo bash -c "cat > /etc/resolv.conf << 'EOF'
-nameserver 192.168.90.152
+nameserver 192.168.90.1
 EOF"
 		%s 
 		
@@ -514,10 +514,10 @@ EOF"
 		sudo /usr/local/bin/k3s kubectl wait --for=condition=Ready nodes --all --timeout=300s
 
 		# Setting up Longhorn pre-requisites
-		curl -sSfL -o longhornctl https://github.com/longhorn/cli/releases/download/v1.10.1/longhornctl-linux-amd64
-		chmod +x longhornctl
-		sudo mv longhornctl /usr/local/bin/longhornctl
-		sudo transactional-update pkg install -y nfs-client cryptsetup device-mapper
+		#curl -sSfL -o longhornctl https://github.com/longhorn/cli/releases/download/v1.10.1/longhornctl-linux-amd64
+		#chmod +x longhornctl
+		#sudo mv longhornctl /usr/local/bin/longhornctl
+		#sudo transactional-update pkg install -y nfs-client cryptsetup device-mapper
 		
 		
 		sudo ls /var/lib/rancher/k3s/server/node-token
@@ -527,7 +527,7 @@ EOF"
 			set -e
 			set -x
 			sudo bash -c "cat > /etc/resolv.conf << 'EOF'
-nameserver 192.168.90.152
+nameserver 192.168.90.1
 EOF"
 			%s
 			# Wait for first server to be ready
@@ -589,7 +589,7 @@ func installK3SWorker(ctx *pulumi.Context, lbIP, vmPassword, workerIP string, vm
 	k3sCommand := pulumi.Sprintf(`
 		# Set DNS resolver
 		sudo tee /etc/resolv.conf << 'EOF'
-nameserver 192.168.90.152
+nameserver 192.168.90.1
 EOF
 
 		# Wait for server to be ready
@@ -1003,7 +1003,7 @@ func installRKE2Server(ctx *pulumi.Context, lbIP, vmPassword, serverIP string, v
 			# Set DNS resolver
 			sudo tee /etc/systemd/resolved.conf << 'EOF'
 [Resolve]
-DNS=192.168.90.152 8.8.8.8
+DNS=192.168.90.1 8.8.8.8
 FallbackDNS=1.1.1.1
 DNSStubListener=no
 EOF
@@ -1115,7 +1115,7 @@ EOF
 			# Set DNS resolver
 			sudo tee /etc/systemd/resolved.conf << 'EOF'
 [Resolve]
-DNS=192.168.90.152 8.8.8.8
+DNS=192.168.90.1 8.8.8.8
 FallbackDNS=1.1.1.1
 DNSStubListener=no
 EOF
@@ -1192,7 +1192,7 @@ func installRKE2Worker(ctx *pulumi.Context, lbIP, vmPassword, workerIP string, v
 	rke2Command := pulumi.Sprintf(`
 		# Set DNS resolver
 		sudo tee /etc/resolv.conf << 'EOF'
-nameserver 192.168.90.152
+nameserver 192.168.90.1
 EOF
 
 		# Wait for server to be ready
