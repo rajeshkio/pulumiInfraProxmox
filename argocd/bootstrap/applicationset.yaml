@@ -54,6 +54,14 @@ spec:
           repoURL: https://rancher.github.io/k3k
           namespace: k3k-system
           releaseName: k3k
+       
+        - cluster: k3k-dev
+          app-name: neuvector
+          chart: core
+          targetRevision: 2.10.2
+          repoURL: https://neuvector.github.io/neuvector-helm
+          namespace: cattle-neuvector-system
+          releaseName: neuvector
 
   template:
     metadata:

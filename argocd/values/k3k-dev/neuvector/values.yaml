@@ -1,0 +1,26 @@
+tag: 5.5.1
+rbac: true
+controller:
+  apisvc:
+    type: ClusterIP
+  ranchersso:
+    enabled: true
+  federation:
+    managedsvc:
+      type: ClusterIP
+    mastersvc:
+      type: ClusterIP
+  replicas: 1
+  pvc:
+    enabled: false
+cve:
+  scanner:
+    replicas: 1
+global:
+  cattle:
+    clusterId: c-tbhkb
+    url: https://rancher.rajesh-kumar.in
+  systemDefaultRegistry: registry.rancher.com
+manager:
+  svc:
+    type: ClusterIP
