@@ -12,7 +12,9 @@ controller:
       type: ClusterIP
   replicas: 1
   pvc:
-    enabled: false
+    enabled: true
+    storageClass: longhorn
+    capacity: 2G 
 cve:
   scanner:
     replicas: 1

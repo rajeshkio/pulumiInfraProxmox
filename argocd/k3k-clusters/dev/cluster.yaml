@@ -22,3 +22,6 @@ spec:
   expose:
     nodePort: {}
   mirrorHostNodes: true
+  sync:
+    storageClasses:
+      enabled: true
