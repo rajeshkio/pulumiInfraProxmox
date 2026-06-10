@@ -1,0 +1,11 @@
+USER-SUPPLIED VALUES:
+global:
+  cattle:
+    clusterId: c-wdjwc
+    clusterName: ai-cluster
+    rkePathPrefix: ""
+    rkeWindowsPathPrefix: ""
+    systemDefaultRegistry: registry.rancher.com
+    systemProjectId: p-dp9jf
+    url: https://rancher.rajesh-kumar.in
+  systemDefaultRegistry: registry.rancher.com

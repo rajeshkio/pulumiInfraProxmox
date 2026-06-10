@@ -1,0 +1,13 @@
+USER-SUPPLIED VALUES:
+agentTLSMode: system-store
+auditLog:
+  enabled: false
+  level: 1
+bootstrapPassword: iGnFSBupecFR6@
+debug: false
+hostname: rancher.rajesh-kumar.in
+ingress:
+  enabled: false
+privateCA: false
+replicas: 1
+tls: external

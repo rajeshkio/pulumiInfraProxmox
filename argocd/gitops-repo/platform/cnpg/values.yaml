@@ -1,0 +1,4 @@
+USER-SUPPLIED VALUES:
+global:
+  imagePullSecrets:
+  - rancher-registry-creds
