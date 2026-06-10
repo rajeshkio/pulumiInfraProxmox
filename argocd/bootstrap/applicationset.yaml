@@ -1,0 +1,85 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: platform
+  namespace: argocd
+spec:
+  generators:
+  - list:
+      elements:
+        - cluster: suse-ai
+          app-name: cert-manager
+          chart: cert-manager
+          targetRevision: v1.20.2
+          repoURL: https://charts.jetstack.io
+          namespace: cert-manager
+          releaseName: cert-manager
+
+        - cluster: suse-ai
+          app-name: metallb
+          chart: metallb
+          targetRevision: 0.15.3
+          repoURL: https://metallb.github.io/metallb
+          namespace: metallb-system
+          releaseName: metallb
+
+        - cluster: suse-ai
+          app-name: velero
+          chart: velero
+          targetRevision: 11.3.2
+          repoURL: https://vmware-tanzu.github.io/helm-charts
+          namespace: velero
+          releaseName: velero
+
+        - cluster: suse-ai
+          app-name: gpu-operator
+          chart: gpu-operator
+          targetRevision: v25.10.1
+          repoURL: https://helm.ngc.nvidia.com/nvidia
+          namespace: gpu-operator
+          releaseName: gpu-operator
+
+        - cluster: suse-ai
+          app-name: external-secrets
+          chart: external-secrets
+          targetRevision: 2.0.0
+          repoURL: https://charts.external-secrets.io
+          namespace: external-secrets
+          releaseName: suse-ai-external-secrets
+
+        - cluster: suse-ai
+          app-name: k3k
+          chart: k3k
+          targetRevision: 1.1.0
+          repoURL: https://rancher.github.io/k3k
+          namespace: k3k-system
+          releaseName: k3k
+
+  template:
+    metadata:
+      name: '{{cluster}}-{{app-name}}'
+      namespace: argocd
+    spec:
+      project: default
+      sources:
+        - repoURL: '{{repoURL}}'
+          targetRevision: '{{targetRevision}}'
+          chart: '{{chart}}'
+          helm:
+            releaseName: '{{releaseName}}'
+            valueFiles:
+              - $values/argocd/values/{{cluster}}/{{app-name}}/values.yaml
+        - repoURL: https://github.com/rajeshkio/pulumiInfraProxmox.git
+          targetRevision: HEAD
+          ref: values
+      destination:
+        name: '{{cluster}}'
+        namespace: '{{namespace}}'
+      syncPolicy:
+        automated:
+          prune: false
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - ServerSideApply=true
+          - ApplyOutOfSyncOnly=true
