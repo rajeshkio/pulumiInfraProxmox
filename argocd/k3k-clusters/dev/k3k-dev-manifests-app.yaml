@@ -1,0 +1,20 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: k3k-dev-manifests
+  namespace: argocd
+spec:
+  project: default
+  destination:
+    name: k3k-dev
+    namespace: default
+  source:
+    repoURL: https://github.com/rajeshkio/pulumiInfraProxmox.git
+    targetRevision: HEAD
+    path: argocd/k3k-clusters/dev/manifests 
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
