@@ -83,3 +83,9 @@ spec:
           - CreateNamespace=true
           - ServerSideApply=true
           - ApplyOutOfSyncOnly=true
+      ignoreDifferences:
+      - group: nvidia.com
+        kind: ClusterPolicy
+        jsonPointers:
+        - /spec
+        - /status
