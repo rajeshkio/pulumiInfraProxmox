@@ -1,0 +1,21 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: suse-ai-manifests
+  namespace: argocd
+spec:
+  project: default
+  destination:
+    name: suse-ai
+    namespace: default
+  source:
+    repoURL: https://github.com/rajeshkio/pulumiInfraProxmox.git
+    targetRevision: HEAD
+    path: argocd/kustomize/suse-ai
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
