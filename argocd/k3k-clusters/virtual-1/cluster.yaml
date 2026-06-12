@@ -1,8 +1,8 @@
 apiVersion: k3k.io/v1beta1
 kind: Cluster
 metadata:
-  name: mlops
-  namespace: k3k-mlops
+  name: virtualmode 
+  namespace: k3k-virtual
 spec:
   mode: virtual
   servers: 1

@@ -1,0 +1,24 @@
+apiVersion: k3k.io/v1beta1
+kind: Cluster
+metadata:
+  name: virtualmode-b
+  namespace: k3k-virtual-b
+spec:
+  mode: virtual
+  servers: 1
+  agents: 0
+  version: v1.34.3-k3s3
+  serverResources:
+    requests:
+      cpu: "2"
+      memory: 4Gi
+    limits:
+      cpu: "8"
+      memory: 16Gi
+  tlsSANs:
+    - 192.168.90.100
+  serverArgs:
+    - --tls-san=192.168.90.100
+  expose:
+    nodePort: {}
+  mirrorHostNodes: false
