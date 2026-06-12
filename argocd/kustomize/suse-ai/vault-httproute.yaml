@@ -5,7 +5,7 @@ metadata:
   namespace: vault
 spec:
   parentRefs:
-    - name: common-server-gateway-istio
+    - name: common-server-gateway
       namespace: common-gateway
   hostnames:
     - vault.rajesh-kumar.in
