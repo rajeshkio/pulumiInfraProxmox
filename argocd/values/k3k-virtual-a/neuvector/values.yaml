@@ -1,0 +1,23 @@
+tag: 5.5.1
+rbac: true
+controller:
+  apisvc:
+    type: ClusterIP
+  federation:
+    managedsvc:
+      type: ClusterIP
+    mastersvc:
+      type: ClusterIP
+  replicas: 1
+  pvc:
+    enabled: true
+    storageClass: local-path
+    capacity: 2G 
+cve:
+  scanner:
+    replicas: 1
+global:
+  systemDefaultRegistry: registry.rancher.com
+manager:
+  svc:
+    type: ClusterIP

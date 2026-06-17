@@ -63,6 +63,14 @@ spec:
           namespace: cattle-neuvector-system
           releaseName: neuvector
 
+        - cluster: k3k-virtual-a
+          app-name: neuvector
+          chart: core
+          targetRevision: 2.10.2
+          repoURL: https://neuvector.github.io/neuvector-helm
+          namespace: cattle-neuvector-system
+          releaseName: neuvector
+
   template:
     metadata:
       name: '{{cluster}}-{{app-name}}'
