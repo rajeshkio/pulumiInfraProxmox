@@ -489,7 +489,9 @@ EOF"
 			--set gatewayAPI.enabled=true \
 			--set envoy.enabled=true \
 			--set debug.enabled=true \
-			--set securityContext.capabilities.keepCapNetBindService=true 
+			--set securityContext.capabilities.keepCapNetBindService=true \
+			--set gatewayAPI.enableAlpn=true \
+    		--set gatewayAPI.enableAppProtocol=true 
 		
 		# Install cilium CLI
 		CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
@@ -1077,7 +1079,9 @@ EOF
 				--set envoy.enabled=true \
 				--set envoy.log.defaultLevel=debug \
 				--set debug.enabled=true \
-				--set securityContext.capabilities.keepCapNetBindService=true 
+				--set securityContext.capabilities.keepCapNetBindService=true \
+				--set gatewayAPI.enableAlpn=true \
+    			--set gatewayAPI.enableAppProtocol=true 
 			
 			# Install cilium CLI
 			CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
@@ -1687,7 +1691,9 @@ KUBECONFIG=$HOME/.kube/config /usr/local/bin/helm install cilium cilium/cilium \
     --set gatewayAPI.enabled=true \
     --set envoy.enabled=true \
     --set debug.enabled=true \
-    --set securityContext.capabilities.keepCapNetBindService=true 
+    --set securityContext.capabilities.keepCapNetBindService=true \
+	--set gatewayAPI.enableAlpn=true \
+    --set gatewayAPI.enableAppProtocol=true 
 
 # install cilium binary
 CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)

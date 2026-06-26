@@ -11,7 +11,7 @@ spec:
   source:
     repoURL: https://github.com/rajeshkio/pulumiInfraProxmox.git
     targetRevision: HEAD
-    path: argocd/k3k-clusters/virtual-a/manifests 
+    path: argocd/k3k-clusters/k3k-virtual-a/manifests 
   syncPolicy:
     automated:
       prune: false

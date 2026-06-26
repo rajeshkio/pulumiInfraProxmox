@@ -212,7 +212,7 @@ func createVMs(ctx *pulumi.Context, provider *proxmoxve.Provider, vms []VM, vmPa
 			nodeName := vmDef.ProxmoxNode
 			if vmDef.BootMethod == "ipxe" {
 				// Distribute Harvester nodes across different Proxmox hosts
-				proxmoxNodes := []string{"proxmox-1", "proxmox-2", "proxmox-3"}
+				proxmoxNodes := []string{"proxmox-3"} // hardcoding to proxmox-3 for archtectural changes in the home lab
 				nodeName = proxmoxNodes[int(i)%len(proxmoxNodes)]
 				ctx.Log.Info(fmt.Sprintf("  Harvester node %d will be on %s", i+1, nodeName), nil)
 			}

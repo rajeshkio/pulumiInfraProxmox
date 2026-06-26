@@ -10,10 +10,10 @@ spec:
   version: v1.34.3-k3s3 
   serverResources:
     requests:
-      cpu: "2"
-      memory: 4Gi
+      cpu: "4"
+      memory: 8Gi
     limits:
-      cpu: "8"
+      cpu: "6"
       memory: 16Gi
   tlsSANs:
     - 192.168.90.100

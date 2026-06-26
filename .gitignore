@@ -8,4 +8,5 @@ proxmox-token.txt
 Pulumi.dev.yaml
 *-kubeconfig.yaml
 rke2-kubeconfig.yaml
-
+argocd/backup/*
+untracked-backup

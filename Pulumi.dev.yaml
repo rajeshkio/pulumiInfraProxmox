@@ -50,7 +50,7 @@ config:
   proxmoxInfra:vms:
     # K3s Infrastructure
     - <<: *lb-vm
-      count: 1
+      count: 0
       name: "k3s-lb"
       ips: ["192.168.90.200"]
 
@@ -60,7 +60,7 @@ config:
       cpu: 8
       memory: 8000
       templateId: 9001
-      count: 3
+      count: 0
       diskSize: 150
 
     - <<: *k8s-worker
@@ -94,12 +94,12 @@ config:
     # Kubeadm Infrastructure
     - <<: *lb-vm
       name: "kubeadm-lb"
-      count: 1
+      count: 0
       ips: ["192.168.90.202"]
 
     - <<: *k8s-cp
       name: "kubeadm-servers"
-      count: 3
+      count: 0
       templateId: 9005 # Override template (Ubuntu not SLE Micro)
       ips: ["192.168.90.230", "192.168.90.231", "192.168.90.232"]
       cpu: 8
@@ -118,7 +118,7 @@ config:
       bootMethod: "ipxe"
       ipxeConfig:
         isoFiles:
-          - "harvester-create-v1.5.2.iso"
+          - "harvester-boot-v1.5.2.iso"
       memory: 40000
       cpu: 12
       diskSize: 350
@@ -128,7 +128,7 @@ config:
   # Enable only what you need - services discover their target VMs
   proxmoxInfra:services:
     k3s:
-      enabled: true
+      enabled: false
       loadBalancer: ["k3s-lb"]
       controlPlane: ["k3s-servers"]
       workers: []
@@ -155,7 +155,7 @@ config:
             name: supervisor
     # Kubeadm (not yet implemented)
     kubeadm:
-      enabled: true
+      enabled: false
       loadBalancer: ["kubeadm-lb"]
       controlPlane: ["kubeadm-servers"]
       workers: []

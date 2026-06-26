@@ -293,7 +293,7 @@ func createHarvesterVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 		},
 		Cdrom: &vm.VirtualMachineCdromArgs{
 			//	Enabled:   pulumi.Bool(true),
-			FileId:    pulumi.String(fmt.Sprintf("nas-vm-images:iso/%s", isoFileName)),
+			FileId:    pulumi.String(fmt.Sprintf("nas-vm-storage:iso/%s", isoFileName)),
 			Interface: pulumi.String("ide2"),
 		},
 		NetworkDevices: &vm.VirtualMachineNetworkDeviceArray{
