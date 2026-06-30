@@ -248,7 +248,7 @@ func createHarvesterVM(ctx *pulumi.Context, provider *proxmoxve.Provider, vmInde
 		pulumi.Provider(provider),
 		pulumi.DeleteBeforeReplace(true),
 		pulumi.IgnoreChanges([]string{"nodeName"}),
-		pulumi.IgnoreChanges([]string{"clone", "disks"}),
+		pulumi.IgnoreChanges([]string{"clone", "disks", "cdrom"}),
 	}
 
 	if vmIndex == 0 {

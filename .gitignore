@@ -10,3 +10,4 @@ Pulumi.dev.yaml
 rke2-kubeconfig.yaml
 argocd/backup/*
 untracked-backup
+selfSignedCerts

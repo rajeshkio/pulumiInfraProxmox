@@ -1,238 +1,299 @@
-# PulumiInfraProxmox
+<div align="center">
+  <img src="https://capsule-render.vercel.app/api?type=waving&color=0:8A3391,50:326CE5,100:E57000&height=200&section=header&text=PulumiInfraProxmox&fontSize=42&fontColor=f0f6fc&desc=Infrastructure%20as%20Code%20for%20Proxmox%20VE%20using%20Pulumi%20and%20Go&descSize=15&descAlignY=75&animation=fadeIn" alt="PulumiInfraProxmox" width="100%">
+</div>
 
-A flexible, service-oriented infrastructure deployment system for Proxmox VE using Pulumi and Go. Deploy independent, high-availability Kubernetes clusters (K3s, RKE2, Kubeadm), Harvester HCI, and service-specific HAProxy load balancers with intelligent dependency isolation and automatic configuration.
+<div align="center">
 
-## 🚀 Quick Start
+[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat-square&logo=go&logoColor=white)](https://golang.org)
+[![Pulumi](https://img.shields.io/badge/Pulumi-IaC-8A3391?style=flat-square&logo=pulumi&logoColor=white)](https://pulumi.com)
+[![Proxmox VE](https://img.shields.io/badge/Proxmox-VE-E57000?style=flat-square&logo=proxmox&logoColor=white)](https://pve.proxmox.com)
+[![License](https://img.shields.io/badge/license-MIT-2ea043?style=flat-square)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/rajeshkio/pulumiInfraProxmox?style=flat-square&color=yellow)](https://github.com/rajeshkio/pulumiInfraProxmox/stargazers)
+[![Forks](https://img.shields.io/github/forks/rajeshkio/pulumiInfraProxmox?style=flat-square)](https://github.com/rajeshkio/pulumiInfraProxmox/forks)
+[![Last Commit](https://img.shields.io/github/last-commit/rajeshkio/pulumiInfraProxmox?style=flat-square)](https://github.com/rajeshkio/pulumiInfraProxmox/commits/main)
 
-```bash
-# Clone the repository
-git clone https://github.com/rajeshkio/pulumiInfraProxmox.git 
-cd pulumiInfraProxmox
+</div>
 
-# Install dependencies
-go mod download
+---
 
-# Configure Pulumi stack
-pulumi stack init dev
+A service-oriented infrastructure deployment system for Proxmox VE, built with Pulumi and Go. Deploy independent, high-availability Kubernetes clusters (K3s, RKE2) and Harvester HCI using a two-phase architecture that separates VM provisioning from service installation. Each service uses dedicated VM templates to ensure complete lifecycle isolation.
 
-# Set environment variables
-export PROXMOX_VE_ENDPOINT="https://your-proxmox:8006/api2/json"
-export PROXMOX_VE_USERNAME="user@pam"
-export PROXMOX_VE_PASSWORD="your-password"
-export PROXMOX_VE_SSH_PRIVATE_KEY="$(cat ~/.ssh/id_rsa)"
-export SSH_PUBLIC_KEY="$(cat ~/.ssh/id_rsa.pub)"
+## Table of Contents
 
-# Deploy infrastructure
-pulumi up
+- [Architecture](#architecture)
+- [Project Structure](#project-structure)
+- [Prerequisites](#prerequisites)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Available Services](#available-services)
+- [Template Strategy](#template-strategy)
+- [Boot Methods](#boot-methods)
+- [Deployment Examples](#deployment-examples)
+- [Outputs](#outputs)
+- [Troubleshooting](#troubleshooting)
+- [Resource Requirements](#resource-requirements)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Architecture
+
+```mermaid
+graph TD
+    A["Pulumi - Go\npulumi up"] --> B
+
+    subgraph Phase1 ["Phase 1 - Infrastructure"]
+        B["Create VM Groups"]
+        B --> C["K3s VMs\n1x LB + 3x Control Plane\ncloud-init boot"]
+        B --> D["RKE2 VMs\n1x LB + 3x Control Plane\ncloud-init boot"]
+        B --> E["Harvester Nodes\niPXE boot / DHCP\n1 node or 3+ nodes"]
+    end
+
+    subgraph Phase2 ["Phase 2 - Services"]
+        F["Install Services"]
+        F --> G["K3s Cluster\nHAProxy configured\nK3s HA via SSH"]
+        F --> H["RKE2 Cluster\nHAProxy configured\nRKE2 HA via SSH"]
+    end
+
+    C --> F
+    D --> F
+    E --> I["Self-installs via iPXE\nNo service phase"]
+
+    G --> J["Proxmox VE Cluster\nproxmox-1 / proxmox-2 / proxmox-3"]
+    H --> J
+    I --> J
 ```
 
-## 📁 Project Structure
+### Two-Phase Deployment
+
+Deployment runs in two sequential phases within a single `pulumi up`:
+
+**Phase 1 - Infrastructure:** Creates all VM groups from Proxmox templates. VMs are cloned sequentially per template per Proxmox node to prevent NFS lock contention. VM groups with `count: 0` are skipped silently.
+
+**Phase 2 - Services:** Installs and configures software on the provisioned VMs via SSH. Services discover their target VMs by name from the config. Each enabled service gets its own HAProxy load balancer with dynamically built backends.
+
+### Dependency Isolation
+
+Each service uses its own dedicated Proxmox templates. This means:
+
+- Destroying K3s VMs has zero effect on RKE2 or Harvester
+- Sequential cloning is scoped per template per node, so K3s and RKE2 clone in parallel from different templates
+- Load balancers are never shared between services
+
+## Project Structure
 
 ```
 pulumiInfraProxmox/
-├── main.go                 # Main Pulumi program & orchestration
-├── types.go               # Data structures & service definitions
-├── handlers.go            # Service handlers (K3s, RKE2, Harvester, HAProxy)
-├── vm_creation.go         # VM creation (cloud-init & iPXE boot)
-├── utils.go               # Configuration loading & utilities
-├── services.go            # Service execution engine
-├── go.mod                 # Go module dependencies
-├── Pulumi.yaml            # Pulumi project configuration
-└── Pulumi.dev.yaml        # Stack configuration with services
+|-- main.go           # Pulumi entrypoint, orchestrates two-phase deployment
+|-- types.go          # Data structures: VM, Services, ServiceConfig, HAProxy
+|-- handlers.go       # Service handlers for K3s, RKE2, and HAProxy
+|-- executers.go      # Service execution engine and dispatch
+|-- vm_creation.go    # VM provisioning via cloud-init and iPXE boot
+|-- utils.go          # Config loading, validation, Proxmox provider setup
+|-- go.mod            # Go module dependencies
+|-- Pulumi.yaml       # Pulumi project configuration
+|-- Pulumi.dev.yaml   # Stack configuration (VMs and services)
+|-- .env.example      # Environment variable reference
+|-- argocd/           # ArgoCD ApplicationSet manifests
+|-- cmd/
+|   |-- ipxe-gen/     # iPXE ISO generator for Harvester
+|-- docs/
+    |-- banner.svg
+    |-- architecture.svg
 ```
 
-## 🏗️ Architecture
+## Prerequisites
 
-### Two-Phase Deployment
-1. **Infrastructure Phase**: Creates VMs with isolated template-based dependencies
-2. **Services Phase**: Installs and configures software on VMs
+- [Go 1.25+](https://golang.org/dl/)
+- [Pulumi CLI](https://www.pulumi.com/docs/install/)
+- A Proxmox VE cluster with at least one node
+- A Proxmox API token with VM creation permissions
+- SSH key access to Proxmox nodes (used for VM provisioning)
+- VM templates prepared on shared/NFS storage (see [Template Strategy](#template-strategy))
 
-### Dependency Isolation
-Each service (K3s, RKE2, Kubeadm) uses **dedicated templates** to ensure complete independence:
-- VMs from different services can be destroyed without cascading effects
-- Sequential cloning per template prevents NFS lock contention
-- Load balancers are service-specific, not shared
+## Quick Start
 
-### Smart Service Discovery
-Services automatically discover their target VMs through configuration. No manual IP management - services find VMs by target names.
+**Step 1: Clone the repository**
 
-## 📦 Available Services
-
-### Kubernetes Distributions
-- **K3s**: Lightweight Kubernetes with HA support
-- **RKE2**: Production-grade Kubernetes  
-- **Kubeadm**: Native Kubernetes deployment
-
-### Infrastructure Services
-- **HAProxy**: Service-specific load balancers with dynamic backend configuration
-- **Harvester**: Hyperconverged infrastructure platform (iPXE boot)
-
-## 🎯 Template Strategy
-
-Each service uses isolated templates to prevent cross-service dependencies:
-
-| Service | Component | Template ID | Purpose |
-|---------|-----------|-------------|---------|
-| K3s | Load Balancer | 9000 | Ubuntu-based HAProxy |
-| K3s | Servers/Workers | 9001 | SLE Micro for K3s |
-| RKE2 | Load Balancer | 9002 | Ubuntu-based HAProxy |
-| RKE2 | Servers | 9001 | SLE Micro for RKE2 servers |
-| RKE2 | Workers | 9000 | SLE Micro for RKE2 workers |
-
-### Template Requirements
-- **No cloud-init disk** in template configuration (Pulumi creates it dynamically)
-- **qemu-guest-agent** must be installed in template
-- Templates stored on shared NFS storage
-
-### Template Creation
 ```bash
-# Create templates on proxmox-1
-qm clone <base-vm> 9000 --full --name ubuntu-lb-template
-qm set 9000 --delete ide2  # Remove cloud-init disk
-# Install qemu-guest-agent in VM before templating
-qm set 9000 --template 1
-
-# Verify no orphaned cloud-init files
-ls /mnt/pve/nas-storage/images/9000/
-# Should NOT contain vm-9000-cloudinit.qcow2
+git clone https://github.com/rajeshkio/pulumiInfraProxmox.git
+cd pulumiInfraProxmox
 ```
 
-## ⚙️ Configuration
+**Step 2: Install Go dependencies**
 
-### Environment Variables
 ```bash
-# Proxmox Connection
+go mod download
+```
+
+**Step 3: Create a Pulumi stack**
+
+```bash
+pulumi stack init dev
+```
+
+**Step 4: Export required environment variables**
+
+```bash
+# Proxmox API connection (picked up automatically by the provider)
 export PROXMOX_VE_ENDPOINT="https://your-proxmox:8006/api2/json"
-export PROXMOX_VE_USERNAME="user@pam"
-export PROXMOX_VE_PASSWORD="your-password"
+export PROXMOX_VE_API_TOKEN="user@pam!token-name=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 
-# SSH Authentication
+# SSH access to Proxmox nodes (used during VM provisioning)
+export PROXMOX_VE_SSH_USERNAME="root"
 export PROXMOX_VE_SSH_PRIVATE_KEY="$(cat ~/.ssh/id_rsa)"
+
+# Public key injected into VMs via cloud-init
 export SSH_PUBLIC_KEY="$(cat ~/.ssh/id_rsa.pub)"
 ```
 
-Set password
+> [!NOTE]
+> The Proxmox API token format is `user@realm!token-name=uuid`. You can create one in the Proxmox UI under Datacenter > Permissions > API Tokens.
+
+**Step 5: Set the VM password**
+
+This password is injected into VMs via cloud-init and stored encrypted in your stack config:
+
 ```bash
-pulumi config set password password --secret
+pulumi config set password your-vm-password --secret
 ```
 
-### Pulumi Configuration (Pulumi.dev.yaml)
+**Step 6: Configure your stack**
+
+Edit `Pulumi.dev.yaml` with your node names, template IDs, IP addresses, and which services to enable. See [Configuration](#configuration) for a full reference.
+
+**Step 7: Deploy**
+
+```bash
+pulumi up
+```
+
+## Configuration
+
+### Required Environment Variables
+
+| Variable | Description |
+|---|---|
+| `PROXMOX_VE_ENDPOINT` | Proxmox API URL, e.g. `https://192.168.1.100:8006/api2/json` |
+| `PROXMOX_VE_API_TOKEN` | API token in format `user@pam!token-name=uuid` |
+| `PROXMOX_VE_SSH_USERNAME` | SSH username for connecting to Proxmox nodes |
+| `PROXMOX_VE_SSH_PRIVATE_KEY` | Private key content for Proxmox SSH access |
+| `SSH_PUBLIC_KEY` | Public key injected into VMs via cloud-init |
+
+### VM Creation Tuning
+
+```yaml
+proxmoxInfra:vmCreation:
+  maxRetries: 5    # Retry attempts per VM on clone failure (default: 5)
+  batchSize: 3     # VMs created in parallel within a batch (default: 3)
+  batchDelay: 10   # Seconds to wait between batches (default: 10)
+```
+
+### VM Definition Fields
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `name` | Yes | - | VM group name, used for service discovery |
+| `count` | Yes | - | Number of VMs to create. Set to `0` to skip |
+| `templateId` | Yes* | - | Proxmox template VM ID. Required for cloud-init VMs |
+| `cpu` | Yes | - | vCPU count |
+| `memory` | Yes | - | RAM in MB |
+| `diskSize` | Yes | - | Disk size in GB |
+| `ips` | Yes* | - | Static IP list. Required for cloud-init VMs |
+| `proxmoxNode` | No | `proxmox-3` | Target Proxmox node name |
+| `username` | No | `rajeshk` | OS user created via cloud-init |
+| `authMethod` | No | `ssh-key` | Authentication method: `ssh-key` or `password` |
+| `bootMethod` | No | `cloud-init` | Boot method: `cloud-init` or `ipxe` |
+| `ipxeConfig` | Yes* | - | Required when `bootMethod` is `ipxe` |
+
+### Full Stack Configuration Reference (Pulumi.dev.yaml)
 
 ```yaml
 config:
-  proxmoxInfra:gateway: 192.168.90.1
+  proxmoxInfra:gateway: "192.168.1.1"
+
   proxmoxInfra:vmCreation:
-    maxRetries: 5 # Retry attempts per VM (default: 5)
-  # ========================================
-  # INFRASTRUCTURE LAYER - Virtual Machines
-  # ========================================
-  # Define your VMs - pure infrastructure, no services attached yet
-
-  proxmoxInfra:lb-vm-template: &lb-vm
-    count: 1
-    templateId: 9000
-    cpu: 2
-    memory: 2000
-    diskSize: 50
-    username: rajeshk
-    authMethod: ssh-key
-    proxmoxNode: proxmox-2
-    bootMethod: cloud-init
-  proxmoxInfra:k8s-cp-template: &k8s-cp
-    count: 3
-    templateId: 9001 # SLE Micro template
-    cpu: 4
-    memory: 4000
-    diskSize: 50
-    username: rajeshk
-    authMethod: ssh-key
-    proxmoxNode: proxmox-2
-    bootMethod: cloud-init
-  proxmoxInfra:k8s-api-port: &k8s-api
-    name: "api"
-    frontend: 6443
-    backend: 6443
-  proxmoxInfra:rke2-supervisor-port: &rke2-supervisor
-    name: "supervisor"
-    frontend: 9345
-    backend: 9345
-
-  proxmoxInfra:k8s-worker-template: &k8s-worker
-    count: 2
-    templateId: 9001 # SLE Micro template
-    cpu: 4
-    memory: 8000
-    diskSize: 50
-    username: rajeshk
-    authMethod: ssh-key
-    proxmoxNode: proxmox-2
-    bootMethod: cloud-init
+    maxRetries: 5
+    batchSize: 3
+    batchDelay: 10
 
   proxmoxInfra:vms:
-    # K3s Infrastructure
-    - <<: *lb-vm
-      name: "k3s-lb"
-      ips: ["192.168.90.200"]
 
-    - <<: *k8s-cp
-      name: "k3s-servers"
-      ips: ["192.168.90.180", "192.168.90.181", "192.168.90.182"]
+    # K3s Load Balancer
+    - name: "k3s-lb"
+      count: 1
+      templateId: 9000        # Ubuntu template with HAProxy installed
+      cpu: 2
+      memory: 2048
+      diskSize: 50
+      username: youruser
+      authMethod: ssh-key
+      proxmoxNode: proxmox-1
+      bootMethod: cloud-init
+      ips: ["192.168.1.200"]
 
-    - <<: *k8s-worker
-      name: "k3s-workers"
-      count: 0 # Disabled by default, enable when needed
-      ips: ["192.168.90.190", "192.168.90.191"]
-
-    # RKE2 Infrastructure
-    - <<: *lb-vm
-      name: "rke2-lb"
-      ips: ["192.168.90.201"]
-      templateId: 9002
-
-    - <<: *k8s-cp
-      name: "rke2-servers"
-      ips: ["192.168.90.210", "192.168.90.211", "192.168.90.212"]
-      templateId: 9001
-
-    - <<: *k8s-worker
-      name: "rke2-workers"
-      count: 0 # Disabled by default, enable when needed
-      ips: ["192.168.90.220", "192.168.90.221"]
-      templateId: 9000
-
-    # Kubeadm Infrastructure
-    - <<: *lb-vm
-      name: "kubeadm-lb"
-      count: 0
-      ips: ["192.168.90.202"]
-
-    - <<: *k8s-cp
-      name: "kubeadm-servers"
-      count: 0
-      templateId: 9000 # Override template (Ubuntu not SLE Micro)
-      ips: ["192.168.90.230", "192.168.90.231", "192.168.90.232"]
-
-    - <<: *k8s-worker
-      name: "kubeadm-workers"
-      count: 0
-      templateId: 9000
-      ips: ["192.168.90.240", "192.168.90.241"]
-
-    # Harvester
-    - name: "harvester-nodes"
+    # K3s Control Plane (3 nodes for HA)
+    - name: "k3s-servers"
       count: 3
-      bootMethod: "ipxe"
+      templateId: 9001        # SLE Micro or Ubuntu template
+      cpu: 4
+      memory: 4096
+      diskSize: 50
+      username: youruser
+      authMethod: ssh-key
+      proxmoxNode: proxmox-1
+      bootMethod: cloud-init
+      ips: ["192.168.1.180", "192.168.1.181", "192.168.1.182"]
+
+    # K3s Workers (set count: 0 to disable)
+    - name: "k3s-workers"
+      count: 0
+      templateId: 9001
+      cpu: 4
+      memory: 8192
+      diskSize: 100
+      username: youruser
+      authMethod: ssh-key
+      proxmoxNode: proxmox-1
+      bootMethod: cloud-init
+      ips: ["192.168.1.190", "192.168.1.191"]
+
+    # RKE2 Load Balancer (use a separate template from K3s LB)
+    - name: "rke2-lb"
+      count: 1
+      templateId: 9002
+      cpu: 2
+      memory: 2048
+      diskSize: 50
+      username: youruser
+      authMethod: ssh-key
+      proxmoxNode: proxmox-2
+      bootMethod: cloud-init
+      ips: ["192.168.1.201"]
+
+    # RKE2 Control Plane (use a separate template from K3s servers)
+    - name: "rke2-servers"
+      count: 3
+      templateId: 9003
+      cpu: 4
+      memory: 4096
+      diskSize: 50
+      username: youruser
+      authMethod: ssh-key
+      proxmoxNode: proxmox-2
+      bootMethod: cloud-init
+      ips: ["192.168.1.210", "192.168.1.211", "192.168.1.212"]
+
+    # Harvester (single node or 3+ nodes for HA, never 2)
+    - name: "harvester-nodes"
+      count: 1
+      bootMethod: ipxe
       ipxeConfig:
         isoFiles:
-          - "harvester-create-v1.4.3.iso"
-          - "harvester-join-v1.4.3.iso"
-      memory: 40000
+          - "harvester-boot-v1.5.2.iso"   # Single ISO for single node
+      memory: 40960
       cpu: 12
       diskSize: 300
-  # ========================================
-  # SERVICES LAYER - What runs on those VMs
-  # ========================================
-  # Enable only what you need - services discover their target VMs
+
   proxmoxInfra:services:
     k3s:
       enabled: true
@@ -243,263 +304,330 @@ config:
         cluster-init: true
         tls-san-loadbalancer: true
         ports:
-          - backend: 6443
+          - name: api
             frontend: 6443
-            name: api
+            backend: 6443
+
     rke2:
-      enabled: true
+      enabled: false
       loadBalancer: ["rke2-lb"]
       controlPlane: ["rke2-servers"]
-      workers: ["rke2-workers"]
+      workers: []
       config:
         cluster-init: true
         ports:
-          - backend: 6443
+          - name: api
             frontend: 6443
-            name: api
-          - backend: 9345
+            backend: 6443
+          - name: supervisor
             frontend: 9345
-            name: supervisor
-    # Kubeadm (not yet implemented)
-    kubeadm:
-      enabled: false
-      loadBalancer: ["kubeadm-lb"]
-      controlPlane: ["kubeadm-servers"]
-      workers: []
-      config:
-        pod-cidr: "10.244.0.0/16"
-        service-cidr: "10.96.0.0/12"
-    # Talos Linux (not yet implemented)
-    talos:
-      enabled: false
-      targets: ["kubeadm-servers", "workers"]
-  proxmoxInfra:password:
-    secure: AAABAIMIdAA1OOB5sH3ekJTNS/LXRh09+WqrmcCWiqSd/piWShM3ow==
+            backend: 9345
 
+    kubeadm:
+      enabled: false   # Not yet implemented
+
+    talos:
+      enabled: false   # Not yet implemented
 ```
 
-## 🔄 Boot Methods
+> [!NOTE]
+> The `proxmoxInfra:password` key is added automatically when you run `pulumi config set password ... --secret`. Do not add it manually.
 
-### Cloud-Init (Default)
-- Used for Ubuntu, SLE Micro templates
-- Requires qemu-guest-agent installed
-- Supports SSH keys and network configuration
-- **Critical**: Template must NOT have cloud-init disk pre-configured
+## Available Services
+
+| Service | Status | Description |
+|---|---|---|
+| `k3s` | Stable | Lightweight HA Kubernetes. Installs via SSH with HAProxy load balancer |
+| `rke2` | Stable | Production-grade HA Kubernetes. Installs via SSH with HAProxy load balancer |
+| `kubeadm` | Not implemented | Planned. Config keys are accepted but do nothing |
+| `talos` | Not implemented | Planned. Config keys are accepted but do nothing |
+| Harvester | Stable | HCI platform. Boots via iPXE, no service phase needed |
+
+## Template Strategy
+
+Each service must use its own dedicated Proxmox templates. This is what enables independent lifecycle management: cloning VMs for K3s and RKE2 happens in parallel because they use different template IDs.
+
+> [!IMPORTANT]
+> Never share a template between two services. If K3s and RKE2 share template 9001, destroying one service's VMs can block the other from cloning.
+
+The table below shows recommended template ID conventions. The IDs are user-defined and must match what you have on your Proxmox cluster.
+
+| Service | Component | Suggested Template ID | Base OS |
+|---|---|---|---|
+| K3s | Load Balancer | 9000 | Ubuntu with HAProxy |
+| K3s | Control Plane + Workers | 9001 | SLE Micro or Ubuntu |
+| RKE2 | Load Balancer | 9002 | Ubuntu with HAProxy |
+| RKE2 | Control Plane + Workers | 9003 | SLE Micro or Ubuntu |
+| Kubeadm | Load Balancer | 9004 | Ubuntu |
+| Kubeadm | Control Plane + Workers | 9005 | Ubuntu |
+
+### Template Requirements
+
+Before using a template:
+
+1. The template must NOT have a cloud-init disk pre-configured (Pulumi creates it dynamically)
+2. `qemu-guest-agent` must be installed and enabled inside the template VM
+3. Templates should be stored on shared/NFS storage accessible from all Proxmox nodes
+
+```bash
+# Example: prepare a template on Proxmox
+qm clone <base-vm-id> 9000 --full --name ubuntu-lb-template
+qm set 9000 --delete ide2          # remove any existing cloud-init disk
+# boot the VM, install qemu-guest-agent, shut it down
+qm set 9000 --template 1
+
+# Verify no orphaned cloud-init file remains
+ls /mnt/pve/nas-storage/images/9000/
+# Output should NOT include vm-9000-cloudinit.qcow2
+```
+
+## Boot Methods
+
+### Cloud-Init (default)
+
+Used for all standard VM types (K3s, RKE2, Kubeadm nodes).
+
+- Requires `qemu-guest-agent` installed in the template
+- Template must have no pre-existing cloud-init disk
+- Supports static IP assignment via the `ips` field
+- SSH key or password authentication configured on first boot
 
 ### iPXE Boot
-- Used for Harvester bare-metal installations
-- Boots from custom iPXE ISOs
-- Pattern-based ISO selection (create/join)
-- DHCP network configuration only
 
-## 🎯 Deployment Examples
+Used exclusively for Harvester HCI nodes.
 
-### Full Stack with Isolated Services
+- VMs boot from ISO files served over the network
+- Network configuration is DHCP only (no static IPs)
+- No `templateId` required
+
+**Harvester node count rules:**
+
+| Count | ISO files needed | Notes |
+|---|---|---|
+| 1 | 1 ISO | Single node, no HA |
+| 2 | Not supported | Breaks etcd quorum. Pulumi will error |
+| 3+ | 2 ISOs (create + join) | HA cluster. ISO names must contain `create` and `join` |
+
 ```yaml
-services:
-  k3s:
-    enabled: true      # Independent K3s cluster
-  rke2:
-    enabled: true      # Independent RKE2 cluster
-  harvester:
-    enabled: true      # Independent HCI platform
+# Single node Harvester
+- name: "harvester-nodes"
+  count: 1
+  bootMethod: ipxe
+  ipxeConfig:
+    isoFiles:
+      - "harvester-boot-v1.5.2.iso"
+
+# HA Harvester (3 nodes)
+- name: "harvester-nodes"
+  count: 3
+  bootMethod: ipxe
+  ipxeConfig:
+    isoFiles:
+      - "harvester-create-v1.5.2.iso"
+      - "harvester-join-v1.5.2.iso"
 ```
 
+## Deployment Examples
+
 ### K3s Only
+
 ```yaml
-services:
+proxmoxInfra:services:
   k3s:
     enabled: true
   rke2:
     enabled: false
-  harvester:
-    enabled: false
 ```
 
-### Selective Destruction
+### RKE2 Only
+
+```yaml
+proxmoxInfra:services:
+  k3s:
+    enabled: false
+  rke2:
+    enabled: true
+```
+
+### K3s and RKE2 Together
+
+Both clusters deploy in parallel during Phase 1 (VM creation) because they use separate templates. Phase 2 installs each cluster independently.
+
+```yaml
+proxmoxInfra:services:
+  k3s:
+    enabled: true
+  rke2:
+    enabled: true
+```
+
+### Disable a VM Group
+
+Set `count: 0` on any VM group to skip it without removing it from config:
+
+```yaml
+- name: "k3s-workers"
+  count: 0    # skipped during deployment
+```
+
+### Selective Destroy
+
+Destroy a single service without touching others by targeting its load balancer URN:
+
 ```bash
 # Destroy only K3s (RKE2 and Harvester remain intact)
-pulumi destroy --target urn:pulumi:dev::proxmoxInfra::proxmoxve:VM/virtualMachine:VirtualMachine::k3s-lb-0 --target-dependents
+pulumi destroy \
+  --target urn:pulumi:dev::proxmoxInfra::proxmoxve:VM/virtualMachine:VirtualMachine::k3s-lb-0 \
+  --target-dependents
 
-# Destroy only RKE2 (K3s and Harvester remain intact)
-pulumi destroy --target urn:pulumi:dev::proxmoxInfra::proxmoxve:VM/virtualMachine:VirtualMachine::rke2-lb-0 --target-dependents
+# Destroy only RKE2
+pulumi destroy \
+  --target urn:pulumi:dev::proxmoxInfra::proxmoxve:VM/virtualMachine:VirtualMachine::rke2-lb-0 \
+  --target-dependents
 ```
 
-## 🔑 Key Features
+## Outputs
 
-### Dependency Isolation
-- **Template-based separation**: Each service uses unique templates
-- **Independent lifecycle**: Destroy one service without affecting others
-- **Sequential cloning**: Prevents NFS lock contention within template groups
-- **No cross-service dependencies**: K3s and RKE2 are completely independent
-
-### Intelligent VM Creation
-- Automatic retry on failures
-- Template dependency management for sequential cloning
-- Cross-Proxmox node distribution for Harvester
-- Cloud-init disk created dynamically (not from template)
-
-### Service-Oriented Architecture
-- Service-specific load balancers (no shared LB)
-- Automatic VM discovery by target names
-- Dynamic HAProxy backend configuration
-- Proper sequencing with service dependencies
-
-### Harvester iPXE Support
-- Pattern-based ISO selection
-- Node distribution across Proxmox hosts
-- Sequential deployment (join waits for create)
-- Etcd quorum validation
-
-## 📤 Outputs
+After `pulumi up`, the following stack outputs are exported:
 
 ```bash
 pulumi stack output
-
-# Example outputs:
-Outputs:
-  k3s-lb-count: 1
-  k3s-lb-ips: ["192.168.90.200"]
-  k3s-servers-count: 3
-  k3s-servers-ips: ["192.168.90.180", "192.168.90.181", "192.168.90.182"]
-  k3s-workers-count: 2
-  k3s-workers-ips: ["192.168.90.190", "192.168.90.191"]
-  
-  rke2-lb-count: 1
-  rke2-lb-ips: ["192.168.90.201"]
-  rke2-servers-count: 3
-  rke2-servers-ips: ["192.168.90.210", "192.168.90.211", "192.168.90.212"]
-  rke2-workers-count: 2
-  rke2-workers-ips: ["192.168.90.220", "192.168.90.221"]
-  
-  harvester-nodes-count: 3
-  harvester-ip-assignment: "DHCP"
-  
-  totalVMsCreated: 15
 ```
 
-## 🛠️ Troubleshooting
+```
+Outputs:
+  k3s-lb-count:       1
+  k3s-lb-ips:         ["192.168.1.200"]
+  k3s-servers-count:  3
+  k3s-servers-ips:    ["192.168.1.180","192.168.1.181","192.168.1.182"]
+  k3s-workers-count:  2
+  k3s-workers-ips:    ["192.168.1.190","192.168.1.191"]
 
-### Cloud-Init Disk Conflicts
+  rke2-lb-count:      1
+  rke2-lb-ips:        ["192.168.1.201"]
+  rke2-servers-count: 3
+  rke2-servers-ips:   ["192.168.1.210","192.168.1.211","192.168.1.212"]
+
+  harvester-nodes-count:        1
+  harvester-nodes-ip-assignment: DHCP
+
+  totalVMsCreated: 11
+```
+
+## Troubleshooting
+
+### Cloud-Init Disk Conflict
+
+**Error:** `disk image already exists`
+
+A previous run left an orphaned cloud-init disk in the template's image directory.
+
 ```bash
-# Error: "disk image already exists"
-# Solution: Remove orphaned cloud-init files from templates
+# Identify and remove it
 ls /mnt/pve/nas-storage/images/9000/
 rm /mnt/pve/nas-storage/images/9000/vm-9000-cloudinit.qcow2
 
-# Verify template has no cloud-init in config
+# Confirm the template has no cloud-init config
 qm config 9000 | grep ide
 # Should return nothing
 ```
 
-### Missing qemu-guest-agent
+### Pulumi Stuck at "Updating"
+
+**Cause:** `qemu-guest-agent` is not running inside the VM. Pulumi waits for the agent to respond before marking the VM as ready.
+
 ```bash
-# Pulumi stuck at "updating" - agent not responding
-# Solution: Install in template before creating VMs
+# Temporarily un-template it, boot, install the agent, re-template
 qm set 9000 --template 0
 qm start 9000
-ssh user@<template-ip>
-sudo apt-get install -y qemu-guest-agent
-sudo systemctl enable --now qemu-guest-agent
-qm stop 9000
+ssh youruser@<template-ip> "sudo systemctl enable --now qemu-guest-agent"
+qm shutdown 9000
 qm set 9000 --template 1
 ```
 
-### Cross-Service Dependencies
-```bash
-# Check dependency graph
-pulumi stack export | jq '.deployment.resources[] | select(.type == "proxmoxve:VM/virtualMachine:VirtualMachine") | {id, dependencies}'
+### VM Clone Fails with NFS Lock Error
 
-# Services should be isolated - no K3s VM should depend on RKE2 VM
+Sequential cloning is enforced per template per Proxmox node, which handles this in most cases. If you still see NFS lock errors, reduce the batch size:
+
+```yaml
+proxmoxInfra:vmCreation:
+  batchSize: 1
+  batchDelay: 15
 ```
 
-### VM Creation Failures
-```bash
-# Enable debug logging
-export PULUMI_DEBUG=true
-pulumi up --logtostderr -v=9 2> debug.log
+### Wrong Environment Variables
 
-# Check for template issues
-grep "template" debug.log
-grep "cloud-init" debug.log
+If `pulumi up` fails immediately with a missing variable error, check you have exported all five required variables. A common mistake is using `PROXMOX_VE_PASSWORD` (wrong) instead of `PROXMOX_VE_API_TOKEN` (correct), or `PROXMOX_VE_USERNAME` instead of `PROXMOX_VE_SSH_USERNAME`.
+
+```bash
+# Verify all five are set
+echo $PROXMOX_VE_ENDPOINT
+echo $PROXMOX_VE_API_TOKEN
+echo $PROXMOX_VE_SSH_USERNAME
+echo $PROXMOX_VE_SSH_PRIVATE_KEY | head -1
+echo $SSH_PUBLIC_KEY | head -1
 ```
 
-## 📊 Resource Requirements
+### Check Cross-Service Dependencies
+
+Services should be fully isolated. Verify no K3s VM depends on an RKE2 VM:
+
+```bash
+pulumi stack export | \
+  jq '.deployment.resources[] | select(.type == "proxmoxve:VM/virtualMachine:VirtualMachine") | {id, dependencies}'
+```
+
+## Resource Requirements
+
+These are baseline recommendations. Adjust based on your workloads.
 
 | Component | CPU | Memory | Disk | Network | Template |
-|-----------|-----|--------|------|---------|----------|
-| K3s LB | 2 | 2GB | 50GB | Static IP | 9000 |
-| K3s Server | 2 | 4GB | 50GB | Static IP | 9001 |
-| K3s Worker | 4 | 8GB | 50GB | Static IP | 9001 |
-| RKE2 LB | 2 | 2GB | 50GB | Static IP | 9004 |
-| RKE2 Server | 2 | 4GB | 50GB | Static IP | 9002 |
-| RKE2 Worker | 4 | 8GB | 50GB | Static IP | 9003 |
-| Harvester Node | 12 | 40GB | 600GB | DHCP | N/A (iPXE) |
+|---|---|---|---|---|---|
+| K3s Load Balancer | 2 | 2 GB | 50 GB | Static IP | Dedicated (e.g. 9000) |
+| K3s Control Plane | 4+ | 4+ GB | 50+ GB | Static IP | Dedicated (e.g. 9001) |
+| K3s Worker | 4+ | 8+ GB | 100+ GB | Static IP | Dedicated (e.g. 9001) |
+| RKE2 Load Balancer | 2 | 2 GB | 50 GB | Static IP | Dedicated (e.g. 9002) |
+| RKE2 Control Plane | 4+ | 4+ GB | 50+ GB | Static IP | Dedicated (e.g. 9003) |
+| RKE2 Worker | 4+ | 8+ GB | 100+ GB | Static IP | Dedicated (e.g. 9003) |
+| Harvester Node | 12+ | 32+ GB | 300+ GB | DHCP | None (iPXE) |
 
-## 🚀 iPXE Setup for Harvester
-
-### Create Boot ISOs
-```bash
-# Helper function for building iPXE ISOs
-function ipxemake {
-    # ... see repository for full implementation
-}
-
-# Build ISOs
-ipxemake v1.4.3
-```
-
-### Required Files on Boot Server
-```
-/var/www/pxe/versions/v1.4.3/
-├── harvester-create-config.yaml
-├── harvester-join-2-config.yaml
-├── harvester-join-3-config.yaml
-├── harvester-create-boot.ipxe
-├── harvester-join-2-boot.ipxe
-└── harvester-join-3-boot.ipxe
-```
-
-## 🔒 Security Considerations
-
-- SSH key authentication preferred over passwords
-- Pulumi secrets for sensitive data
-- Service-specific TLS certificates
-- Isolated network paths per service
-- No shared infrastructure between services
-
-## 🤝 Contributing
+## Contributing
 
 1. Fork the repository
-2. Create feature branch (`git checkout -b feature/new-service`)
-3. Add service handler in `handlers.go`
-4. Create dedicated template for new service
-5. Update types in `types.go`
-6. Test isolated deployment and destruction
-7. Submit PR with examples
+2. Create a feature branch: `git checkout -b feature/new-service`
+3. Add a service handler in `handlers.go`
+4. Register the handler in the `serviceHandlers` map
+5. Add the service struct to `types.go` if needed
+6. Create a dedicated template convention for the new service
+7. Test isolated deployment and selective destruction
+8. Submit a PR with a working example in `Pulumi.dev.yaml`
 
-## 📝 License
+### Adding a New Service
 
-MIT License - see LICENSE file for details
+Each service handler must implement the `ServiceHandler` function signature:
 
-## 🔗 Resources
+```go
+func myServiceHandler(ctx *pulumi.Context, serviceCtx ServiceContext) error {
+    // serviceCtx.VMs       - provisioned VMs
+    // serviceCtx.IPs       - their IP addresses
+    // serviceCtx.Config    - service-specific config from Pulumi.dev.yaml
+    // serviceCtx.GlobalDeps - shared VM group references
+    return nil
+}
+```
+
+Register it alongside the existing handlers in `handlers.go`.
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details.
+
+## Resources
 
 - [Pulumi Documentation](https://www.pulumi.com/docs/)
 - [Proxmox VE API](https://pve.proxmox.com/wiki/Proxmox_VE_API)
+- [pulumi-proxmoxve Provider](https://github.com/muhlba91/pulumi-proxmoxve)
 - [K3s Documentation](https://docs.k3s.io/)
 - [RKE2 Documentation](https://docs.rke2.io/)
 - [Harvester Documentation](https://docs.harvesterhci.io/)
 - [HAProxy Documentation](https://www.haproxy.org/)
-```
-
-Key updates:
-- Added template strategy section explaining the isolation approach
-- Updated template table with all 5 templates (9000-9004)
-- Added template requirements (no cloud-init disk, must have agent)
-- Added template creation instructions
-- Updated configuration examples with correct template IDs
-- Added selective destruction examples
-- Added dependency isolation to key features
-- Added cloud-init and agent troubleshooting
-- Updated resource table with template column
-- Emphasized service independence throughout

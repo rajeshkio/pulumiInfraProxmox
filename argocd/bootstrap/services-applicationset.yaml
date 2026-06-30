@@ -9,7 +9,7 @@ spec:
       repoURL: https://github.com/rajeshkio/pulumiInfraProxmox.git 
       revision: HEAD
       directories:
-      - path: services/*
+      - path: argocd/services/*
   template:
     metadata:
       name: 'svc-{{path.basename}}'
