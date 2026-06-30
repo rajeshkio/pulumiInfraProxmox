@@ -1,0 +1,76 @@
+# Example: RKE2 HA cluster only
+# 1 load balancer + 3 control plane nodes
+# Uses separate templates from K3s to allow independent lifecycle
+#
+# Prerequisites:
+#   Template 9002: Ubuntu VM with HAProxy installed, no cloud-init disk, qemu-guest-agent running
+#   Template 9003: SLE Micro or Ubuntu VM, no cloud-init disk, qemu-guest-agent running
+#   Run: pulumi config set password <your-vm-password> --secret
+
+config:
+  proxmoxInfra:gateway: "192.168.1.1"
+
+  proxmoxInfra:vmCreation:
+    maxRetries: 5
+    batchSize: 3
+    batchDelay: 10
+
+  proxmoxInfra:vms:
+
+    - name: "rke2-lb"
+      count: 1
+      templateId: 9002
+      cpu: 2
+      memory: 2048
+      diskSize: 50
+      username: youruser
+      authMethod: ssh-key
+      proxmoxNode: proxmox-2
+      bootMethod: cloud-init
+      ips: ["192.168.1.201"]
+
+    - name: "rke2-servers"
+      count: 3
+      templateId: 9003
+      cpu: 4
+      memory: 4096
+      diskSize: 50
+      username: youruser
+      authMethod: ssh-key
+      proxmoxNode: proxmox-2
+      bootMethod: cloud-init
+      ips: ["192.168.1.210", "192.168.1.211", "192.168.1.212"]
+
+    - name: "rke2-workers"
+      count: 0
+      templateId: 9003
+      cpu: 4
+      memory: 8192
+      diskSize: 100
+      username: youruser
+      authMethod: ssh-key
+      proxmoxNode: proxmox-2
+      bootMethod: cloud-init
+      ips: ["192.168.1.220", "192.168.1.221"]
+
+  proxmoxInfra:services:
+    k3s:
+      enabled: false
+    rke2:
+      enabled: true
+      loadBalancer: ["rke2-lb"]
+      controlPlane: ["rke2-servers"]
+      workers: ["rke2-workers"]
+      config:
+        cluster-init: true
+        ports:
+          - name: api
+            frontend: 6443
+            backend: 6443
+          - name: supervisor
+            frontend: 9345
+            backend: 9345
+    kubeadm:
+      enabled: false
+    talos:
+      enabled: false

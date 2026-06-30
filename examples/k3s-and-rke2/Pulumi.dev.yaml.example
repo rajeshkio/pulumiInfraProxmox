@@ -1,0 +1,101 @@
+# Example: K3s and RKE2 running side by side
+# Both clusters are fully independent with separate templates and load balancers
+# Phase 1 clones both sets of VMs in parallel (different template IDs)
+# Phase 2 installs each cluster independently
+#
+# Prerequisites:
+#   Template 9000: Ubuntu + HAProxy (K3s LB)
+#   Template 9001: SLE Micro or Ubuntu (K3s nodes)
+#   Template 9002: Ubuntu + HAProxy (RKE2 LB) - must be separate from 9000
+#   Template 9003: SLE Micro or Ubuntu (RKE2 nodes) - must be separate from 9001
+#   Run: pulumi config set password <your-vm-password> --secret
+
+config:
+  proxmoxInfra:gateway: "192.168.1.1"
+
+  proxmoxInfra:vmCreation:
+    maxRetries: 5
+    batchSize: 3
+    batchDelay: 10
+
+  proxmoxInfra:vms:
+
+    - name: "k3s-lb"
+      count: 1
+      templateId: 9000
+      cpu: 2
+      memory: 2048
+      diskSize: 50
+      username: youruser
+      authMethod: ssh-key
+      proxmoxNode: proxmox-1
+      bootMethod: cloud-init
+      ips: ["192.168.1.200"]
+
+    - name: "k3s-servers"
+      count: 3
+      templateId: 9001
+      cpu: 4
+      memory: 4096
+      diskSize: 50
+      username: youruser
+      authMethod: ssh-key
+      proxmoxNode: proxmox-1
+      bootMethod: cloud-init
+      ips: ["192.168.1.180", "192.168.1.181", "192.168.1.182"]
+
+    - name: "rke2-lb"
+      count: 1
+      templateId: 9002
+      cpu: 2
+      memory: 2048
+      diskSize: 50
+      username: youruser
+      authMethod: ssh-key
+      proxmoxNode: proxmox-2
+      bootMethod: cloud-init
+      ips: ["192.168.1.201"]
+
+    - name: "rke2-servers"
+      count: 3
+      templateId: 9003
+      cpu: 4
+      memory: 4096
+      diskSize: 50
+      username: youruser
+      authMethod: ssh-key
+      proxmoxNode: proxmox-2
+      bootMethod: cloud-init
+      ips: ["192.168.1.210", "192.168.1.211", "192.168.1.212"]
+
+  proxmoxInfra:services:
+    k3s:
+      enabled: true
+      loadBalancer: ["k3s-lb"]
+      controlPlane: ["k3s-servers"]
+      workers: []
+      config:
+        cluster-init: true
+        tls-san-loadbalancer: true
+        ports:
+          - name: api
+            frontend: 6443
+            backend: 6443
+    rke2:
+      enabled: true
+      loadBalancer: ["rke2-lb"]
+      controlPlane: ["rke2-servers"]
+      workers: []
+      config:
+        cluster-init: true
+        ports:
+          - name: api
+            frontend: 6443
+            backend: 6443
+          - name: supervisor
+            frontend: 9345
+            backend: 9345
+    kubeadm:
+      enabled: false
+    talos:
+      enabled: false

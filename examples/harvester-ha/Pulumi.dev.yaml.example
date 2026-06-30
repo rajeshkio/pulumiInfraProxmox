@@ -1,0 +1,42 @@
+# Example: Harvester HA cluster (3 nodes)
+# Requires two ISOs: one for the first node (create) and one for join nodes
+# ISO filenames must contain "create" and "join" for automatic role detection
+# Node count must be 1 or 3+. A count of 2 is rejected (breaks etcd quorum)
+#
+# Prerequisites:
+#   ISO files available on the Proxmox node or HTTP boot server
+#   Minimum per node: 12 vCPU, 32 GB RAM, 300 GB disk
+#   Nodes distributed across Proxmox hosts automatically
+#   Run: pulumi config set password <your-vm-password> --secret
+
+config:
+  proxmoxInfra:gateway: "192.168.1.1"
+
+  proxmoxInfra:vmCreation:
+    maxRetries: 3
+    batchSize: 1
+    batchDelay: 60
+
+  proxmoxInfra:vms:
+
+    - name: "harvester-nodes"
+      count: 3
+      bootMethod: ipxe
+      ipxeConfig:
+        isoFiles:
+          - "harvester-create-v1.5.2.iso"
+          - "harvester-join-v1.5.2.iso"
+      cpu: 12
+      memory: 40960
+      diskSize: 350
+      proxmoxNode: proxmox-3
+
+  proxmoxInfra:services:
+    k3s:
+      enabled: false
+    rke2:
+      enabled: false
+    kubeadm:
+      enabled: false
+    talos:
+      enabled: false

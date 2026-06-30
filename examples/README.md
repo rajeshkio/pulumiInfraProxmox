@@ -4,11 +4,11 @@ Ready-to-use stack configurations. Copy the relevant `Pulumi.dev.yaml` to your r
 
 | Example | Services | Nodes | Use case |
 |---|---|---|---|
-| [k3s-only](k3s-only/) | K3s | 1 LB + 3 CP | Lightweight HA Kubernetes |
-| [rke2-only](rke2-only/) | RKE2 | 1 LB + 3 CP | Production-grade HA Kubernetes |
-| [k3s-and-rke2](k3s-and-rke2/) | K3s + RKE2 | 2 LB + 6 CP | Both clusters side by side |
-| [harvester-single-node](harvester-single-node/) | Harvester | 1 node | HCI, no HA, minimal resources |
-| [harvester-ha](harvester-ha/) | Harvester | 3 nodes | HCI with full HA |
+| [k3s-only](k3s-only/Pulumi.dev.yaml.example) | K3s | 1 LB + 3 CP | Lightweight HA Kubernetes |
+| [rke2-only](rke2-only/Pulumi.dev.yaml.example) | RKE2 | 1 LB + 3 CP | Production-grade HA Kubernetes |
+| [k3s-and-rke2](k3s-and-rke2/Pulumi.dev.yaml.example) | K3s + RKE2 | 2 LB + 6 CP | Both clusters side by side |
+| [harvester-single-node](harvester-single-node/Pulumi.dev.yaml.example) | Harvester | 1 node | HCI, no HA, minimal resources |
+| [harvester-ha](harvester-ha/Pulumi.dev.yaml.example) | Harvester | 3 nodes | HCI with full HA |
 
 ## Before you start
 

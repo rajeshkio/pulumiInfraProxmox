@@ -1,0 +1,39 @@
+# Example: Harvester single-node (no HA)
+# Uses a unified boot ISO (Harvester v1.5+)
+# Network is DHCP - no static IPs needed
+#
+# Prerequisites:
+#   ISO file available on the Proxmox node or HTTP boot server
+#   Minimum: 12 vCPU, 32 GB RAM, 300 GB disk per node
+#   Run: pulumi config set password <your-vm-password> --secret
+
+config:
+  proxmoxInfra:gateway: "192.168.1.1"
+
+  proxmoxInfra:vmCreation:
+    maxRetries: 3
+    batchSize: 1
+    batchDelay: 30
+
+  proxmoxInfra:vms:
+
+    - name: "harvester-nodes"
+      count: 1
+      bootMethod: ipxe
+      ipxeConfig:
+        isoFiles:
+          - "harvester-boot-v1.5.2.iso"
+      cpu: 12
+      memory: 32768
+      diskSize: 300
+      proxmoxNode: proxmox-3
+
+  proxmoxInfra:services:
+    k3s:
+      enabled: false
+    rke2:
+      enabled: false
+    kubeadm:
+      enabled: false
+    talos:
+      enabled: false

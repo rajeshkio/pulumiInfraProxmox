@@ -1,0 +1,74 @@
+# Example: K3s HA cluster only
+# 1 load balancer + 3 control plane nodes
+# Workers disabled by default (set count > 0 to enable)
+#
+# Prerequisites:
+#   Template 9000: Ubuntu VM with HAProxy installed, no cloud-init disk, qemu-guest-agent running
+#   Template 9001: SLE Micro or Ubuntu VM, no cloud-init disk, qemu-guest-agent running
+#   Run: pulumi config set password <your-vm-password> --secret
+
+config:
+  proxmoxInfra:gateway: "192.168.1.1"
+
+  proxmoxInfra:vmCreation:
+    maxRetries: 5
+    batchSize: 3
+    batchDelay: 10
+
+  proxmoxInfra:vms:
+
+    - name: "k3s-lb"
+      count: 1
+      templateId: 9000
+      cpu: 2
+      memory: 2048
+      diskSize: 50
+      username: youruser
+      authMethod: ssh-key
+      proxmoxNode: proxmox-1
+      bootMethod: cloud-init
+      ips: ["192.168.1.200"]
+
+    - name: "k3s-servers"
+      count: 3
+      templateId: 9001
+      cpu: 4
+      memory: 4096
+      diskSize: 50
+      username: youruser
+      authMethod: ssh-key
+      proxmoxNode: proxmox-1
+      bootMethod: cloud-init
+      ips: ["192.168.1.180", "192.168.1.181", "192.168.1.182"]
+
+    - name: "k3s-workers"
+      count: 0
+      templateId: 9001
+      cpu: 4
+      memory: 8192
+      diskSize: 100
+      username: youruser
+      authMethod: ssh-key
+      proxmoxNode: proxmox-1
+      bootMethod: cloud-init
+      ips: ["192.168.1.190", "192.168.1.191"]
+
+  proxmoxInfra:services:
+    k3s:
+      enabled: true
+      loadBalancer: ["k3s-lb"]
+      controlPlane: ["k3s-servers"]
+      workers: ["k3s-workers"]
+      config:
+        cluster-init: true
+        tls-san-loadbalancer: true
+        ports:
+          - name: api
+            frontend: 6443
+            backend: 6443
+    rke2:
+      enabled: false
+    kubeadm:
+      enabled: false
+    talos:
+      enabled: false
