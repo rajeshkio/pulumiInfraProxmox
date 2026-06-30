@@ -210,7 +210,7 @@ func handleK3sService(ctx *pulumi.Context, serviceCtx ServiceContext) error {
 		} else {
 			k3sCmd, err := installK3SServer(ctx, lbIP, serviceCtx.VMPassword, serverIP, serverVM, false, k3sServerToken, nil)
 			if err != nil {
-				return fmt.Errorf("cannot install k3s on server %s: %w", serverIP, serverVM)
+				return fmt.Errorf("cannot install k3s on server %s: %v", serverIP, serverVM)
 			}
 			lastServerCommand = k3sCmd
 			//		k3sCommands = append(k3sCommands, k3sCmds)
@@ -774,7 +774,7 @@ func handleRKE2Service(ctx *pulumi.Context, serviceCtx ServiceContext) error {
 		} else {
 			rke2Cmd, err := installRKE2Server(ctx, lbIP, serviceCtx.VMPassword, serverIP, serverVM, false, rke2ServerToken, nil)
 			if err != nil {
-				return fmt.Errorf("cannot install rke2 on server %s: %w", serverIP, serverVM)
+				return fmt.Errorf("cannot install rke2 on server %s: %v", serverIP, serverVM)
 			}
 			lastServerCommand = rke2Cmd
 		}
