@@ -4,6 +4,26 @@ image:
   tag: latest
 replicaCount: 1
 port: 8080
+
+env: []
+# Example:
+# env:
+#   - name: GOTENBERG_URL
+#     value: "http://gotenberg:80"
+
+probes:
+  type: tcp  # tcp or http
+  path: /healthz  # used only if type: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+securityContext:
+  enabled: false
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false
+  dropAllCapabilities: true
+
 resources:
   requests:
     cpu: 100m

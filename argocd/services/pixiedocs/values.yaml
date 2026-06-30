@@ -1,0 +1,33 @@
+serviceName: pixiedocs
+image:
+  repository: rk90229/pixiedocs
+  tag: v1.1.0
+replicaCount: 2
+port: 8080
+
+env:
+  - name: GOTENBERG_URL
+    value: "http://gotenberg:80"
+  - name: PIXIEDOCS_URL
+    value: "http://pixiedocs:80"
+
+probes:
+  type: http
+  path: /health
+  initialDelaySeconds: 10
+  periodSeconds: 30
+
+securityContext:
+  enabled: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false
+  dropAllCapabilities: true
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
