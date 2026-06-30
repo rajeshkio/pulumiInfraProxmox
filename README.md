@@ -11,6 +11,7 @@
 [![Stars](https://img.shields.io/github/stars/rajeshkio/pulumiInfraProxmox?style=flat-square&color=yellow)](https://github.com/rajeshkio/pulumiInfraProxmox/stargazers)
 [![Forks](https://img.shields.io/github/forks/rajeshkio/pulumiInfraProxmox?style=flat-square)](https://github.com/rajeshkio/pulumiInfraProxmox/forks)
 [![Last Commit](https://img.shields.io/github/last-commit/rajeshkio/pulumiInfraProxmox?style=flat-square)](https://github.com/rajeshkio/pulumiInfraProxmox/commits/main)
+[![CI](https://github.com/rajeshkio/pulumiInfraProxmox/actions/workflows/ci.yml/badge.svg)](https://github.com/rajeshkio/pulumiInfraProxmox/actions/workflows/ci.yml)
 
 </div>
 
@@ -24,6 +25,7 @@ A service-oriented infrastructure deployment system for Proxmox VE, built with P
 - [Project Structure](#project-structure)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
+- [vmctl.sh](#vmctlsh)
 - [Configuration](#configuration)
 - [Available Services](#available-services)
 - [Template Strategy](#template-strategy)
@@ -166,6 +168,20 @@ Edit `Pulumi.dev.yaml` with your node names, template IDs, IP addresses, and whi
 ```bash
 pulumi up
 ```
+
+## vmctl.sh
+
+`vmctl.sh` is a shell wrapper around the most common Pulumi operations. Instead of typing full `pulumi` commands, you can use shorter verbs:
+
+```bash
+./vmctl.sh preview    # show what will be created or changed (pulumi preview)
+./vmctl.sh apply      # create or update VMs and services (pulumi up --yes)
+./vmctl.sh list       # print the current stack config file
+./vmctl.sh add        # open the config file in $EDITOR
+./vmctl.sh destroy    # remove all resources (pulumi destroy --yes)
+```
+
+The script targets the `dev` stack by default. To use a different stack, edit the `STACK` variable at the top of the file.
 
 ## Configuration
 
@@ -428,6 +444,8 @@ Used exclusively for Harvester HCI nodes.
 ```
 
 ## Deployment Examples
+
+Ready-to-copy full configs are in the [`examples/`](examples/) directory.
 
 ### K3s Only
 
