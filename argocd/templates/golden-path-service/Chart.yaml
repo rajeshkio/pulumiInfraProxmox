@@ -1,0 +1,4 @@
+apiVersion: v2
+name: golden-path-service
+description: Golden path template for developer microservices
+version: 0.1.0

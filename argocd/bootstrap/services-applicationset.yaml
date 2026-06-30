@@ -1,0 +1,31 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: golden-path-services
+  namespace: argocd
+spec:
+  generators:
+  - git:
+      repoURL: git@github.com:rajeshkio/pulumiInfraProxmox.git
+      revision: HEAD
+      directories:
+      - path: services/*
+  template:
+    metadata:
+      name: 'svc-{{path.basename}}'
+      namespace: argocd
+    spec:
+      project: default
+      source:
+        repoURL: git@github.com:rajeshkio/pulumiInfraProxmox.git
+        targetRevision: HEAD
+        path: '{{path}}'
+      destination:
+        name: suse-ai
+        namespace: 'svc-{{path.basename}}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
