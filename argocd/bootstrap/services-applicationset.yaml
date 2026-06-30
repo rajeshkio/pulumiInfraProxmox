@@ -6,7 +6,7 @@ metadata:
 spec:
   generators:
   - git:
-      repoURL: git@github.com:rajeshkio/pulumiInfraProxmox.git
+      repoURL: https://github.com/rajeshkio/pulumiInfraProxmox.git 
       revision: HEAD
       directories:
       - path: services/*
@@ -17,7 +17,7 @@ spec:
     spec:
       project: default
       source:
-        repoURL: git@github.com:rajeshkio/pulumiInfraProxmox.git
+        repoURL: https://github.com/rajeshkio/pulumiInfraProxmox.git
         targetRevision: HEAD
         path: '{{path}}'
       destination:
